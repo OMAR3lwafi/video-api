@@ -1,0 +1,352 @@
+config:
+  target: http://localhost:3000
+  phases:
+    # Warm-up phase
+    - duration: 30
+      arrivalRate: 2
+      name: "Warm-up"
+
+    # Light load phase
+    - duration: 60
+      arrivalRate: 5
+      name: "Light load"
+
+    # Medium load phase
+    - duration: 120
+      arrivalRate: 10
+      name: "Medium load"
+
+    # Heavy load phase
+    - duration: 180
+      arrivalRate: 20
+      name: "Heavy load"
+
+    # Spike test
+    - duration: 60
+      arrivalRate: 50
+      name: "Spike test"
+
+    # Cool-down phase
+    - duration: 30
+      arrivalRate: 2
+      name: "Cool-down"
+
+  processor: "./load-test-processor.js"
+
+  # Global configuration
+  http:
+    timeout: 30
+    pool: 10
+
+  # Performance thresholds
+  ensure:
+    thresholds:
+      - http.response_time.p95: 2000  # 95th percentile under 2s
+      - http.response_time.p99: 5000  # 99th percentile under 5s
+      - http.response_time.median: 500  # Median under 500ms
+      - http.codes.200: 90  # At least 90% success rate
+      - http.codes.202: 10  # Up to 10% async responses
+      - vusers.failed: 5  # Less than 5% failed virtual users
+
+  # Variables for dynamic data
+  variables:
+    videoFormats:
+      - "mp4"
+      - "mov"
+      - "avi"
+
+    resolutions:
+      - { width: 1280, height: 720 }
+      - { width: 1920, height: 1080 }
+      - { width: 3840, height: 2160 }
+
+    elementTypes:
+      - "video"
+      - "image"
+
+  # Plugins for enhanced reporting
+  plugins:
+    expect: {}
+    metrics-by-endpoint: {}
+    publish-metrics:
+      - type: datadog
+        apikey: "{{ $processEnvironment.DATADOG_API_KEY }}"
+        tags:
+          - "environment:test"
+          - "service:video-api"
+
+scenarios:
+  # Health check scenario - lightweight monitoring
+  - name: "Health Check Load Test"
+    weight: 20
+    flow:
+      - get:
+          url: "/api/health"
+          expect:
+            - statusCode: 200
+            - contentType: "application/json"
+            - hasProperty: "ok"
+            - equals:
+                - "{{ ok }}"
+                - true
+
+  # Video creation scenario - core functionality
+  - name: "Video Creation Load Test"
+    weight: 60
+    flow:
+      - function: "generateVideoJob"
+      - post:
+          url: "/api/v1/videocreate"
+          headers:
+            Content-Type: "application/json"
+          json:
+            output_format: "{{ videoFormat }}"
+            width: "{{ videoWidth }}"
+            height: "{{ videoHeight }}"
+            elements: "{{ videoElements }}"
+          capture:
+            - json: "$.job_id"
+              as: "jobId"
+            - json: "$.status"
+              as: "jobStatus"
+          expect:
+            - statusCode: [200, 202]
+            - contentType: "application/json"
+            - hasProperty: "job_id"
+
+      # Follow up with status check for async jobs
+      - get:
+          url: "/api/v1/videoresult/{{ jobId }}"
+          ifTrue: "{{ jobStatus === 'processing' }}"
+          expect:
+            - statusCode: 200
+            - contentType: "application/json"
+            - hasProperty: "status"
+
+  # Job status query scenario
+  - name: "Job Status Query Load Test"
+    weight: 15
+    flow:
+      - function: "getRandomJobId"
+      - get:
+          url: "/api/v1/videoresult/{{ jobId }}"
+          expect:
+            - statusCode: [200, 404]
+            - contentType: "application/json"
+
+  # User jobs listing scenario
+  - name: "User Jobs Listing Load Test"
+    weight: 5
+    flow:
+      - function: "getRandomUserId"
+      - get:
+          url: "/api/v1/user/{{ userId }}/jobs"
+          qs:
+            page: "{{ $randomInt(1, 5) }}"
+            limit: "{{ $randomInt(10, 50) }}"
+            status: "{{ $randomPick(['completed', 'processing', 'failed', '']) }}"
+          expect:
+            - statusCode: 200
+            - contentType: "application/json"
+            - hasProperty: "jobs"
+            - hasProperty: "pagination"
+
+  # Concurrent video creation scenario
+  - name: "Concurrent Video Processing"
+    weight: 10
+    flow:
+      - parallel:
+          - function: "generateSimpleVideoJob"
+          - post:
+              url: "/api/v1/videocreate"
+              headers:
+                Content-Type: "application/json"
+              json:
+                output_format: "mp4"
+                width: 1280
+                height: 720
+                elements: "{{ simpleElements }}"
+
+          - function: "generateComplexVideoJob"
+          - post:
+              url: "/api/v1/videocreate"
+              headers:
+                Content-Type: "application/json"
+              json:
+                output_format: "mp4"
+                width: 1920
+                height: 1080
+                elements: "{{ complexElements }}"
+
+  # Error handling scenario
+  - name: "Error Handling Load Test"
+    weight: 5
+    flow:
+      - post:
+          url: "/api/v1/videocreate"
+          headers:
+            Content-Type: "application/json"
+          json:
+            output_format: "invalid_format"
+            width: -1
+            height: 0
+            elements: []
+          expect:
+            - statusCode: 400
+            - contentType: "application/json"
+            - hasProperty: "error"
+
+# Custom scenarios for specific load patterns
+after:
+  flow:
+    # Cleanup scenario after load test
+    - function: "reportResults"
+    - get:
+        url: "/api/health"
+        expect:
+          - statusCode: 200
+
+# Stress test configuration (separate scenario)
+stress_test:
+  target: http://localhost:3000
+  phases:
+    # Gradual ramp-up
+    - duration: 300  # 5 minutes
+      arrivalRate: 1
+      rampTo: 100
+      name: "Ramp up to 100 users"
+
+    # Sustained high load
+    - duration: 600  # 10 minutes
+      arrivalRate: 100
+      name: "Sustained 100 users"
+
+    # Peak stress
+    - duration: 180  # 3 minutes
+      arrivalRate: 200
+      name: "Peak stress - 200 users"
+
+    # Gradual ramp-down
+    - duration: 300  # 5 minutes
+      arrivalRate: 200
+      rampTo: 1
+      name: "Ramp down"
+
+  scenarios:
+    - name: "Stress Test Video Creation"
+      weight: 100
+      flow:
+        - function: "generateStressTestJob"
+        - post:
+            url: "/api/v1/videocreate"
+            headers:
+              Content-Type: "application/json"
+            json:
+              output_format: "{{ videoFormat }}"
+              width: "{{ videoWidth }}"
+              height: "{{ videoHeight }}"
+              elements: "{{ stressTestElements }}"
+            expect:
+              - statusCode: [200, 202, 429, 503]  # Allow rate limiting and service unavailable
+
+# Endurance test configuration
+endurance_test:
+  target: http://localhost:3000
+  phases:
+    # Long-running test with moderate load
+    - duration: 3600  # 1 hour
+      arrivalRate: 5
+      name: "Endurance test - 1 hour"
+
+  scenarios:
+    - name: "Endurance Video Creation"
+      weight: 70
+      flow:
+        - function: "generateVideoJob"
+        - post:
+            url: "/api/v1/videocreate"
+            headers:
+              Content-Type: "application/json"
+            json:
+              output_format: "{{ videoFormat }}"
+              width: "{{ videoWidth }}"
+              height: "{{ videoHeight }}"
+              elements: "{{ videoElements }}"
+
+    - name: "Endurance Health Checks"
+      weight: 30
+      flow:
+        - get:
+            url: "/api/health"
+            expect:
+              - statusCode: 200
+
+# Database performance test
+db_performance_test:
+  target: http://localhost:3000
+  phases:
+    - duration: 120
+      arrivalRate: 20
+      name: "Database load test"
+
+  scenarios:
+    - name: "Heavy Database Operations"
+      weight: 100
+      flow:
+        # Create job (INSERT)
+        - function: "generateVideoJob"
+        - post:
+            url: "/api/v1/videocreate"
+            headers:
+              Content-Type: "application/json"
+            json:
+              output_format: "{{ videoFormat }}"
+              width: "{{ videoWidth }}"
+              height: "{{ videoHeight }}"
+              elements: "{{ videoElements }}"
+            capture:
+              - json: "$.job_id"
+                as: "jobId"
+
+        # Query job multiple times (SELECT)
+        - loop:
+            - get:
+                url: "/api/v1/videoresult/{{ jobId }}"
+          count: 3
+
+        # List user jobs (SELECT with pagination)
+        - get:
+            url: "/api/v1/user/user-1/jobs"
+            qs:
+              page: 1
+              limit: 20
+
+# Memory leak detection test
+memory_test:
+  target: http://localhost:3000
+  phases:
+    # Long duration with consistent load
+    - duration: 1800  # 30 minutes
+      arrivalRate: 10
+      name: "Memory leak detection"
+
+  scenarios:
+    - name: "Memory Intensive Operations"
+      weight: 100
+      flow:
+        - function: "generateLargeVideoJob"
+        - post:
+            url: "/api/v1/videocreate"
+            headers:
+              Content-Type: "application/json"
+            json:
+              output_format: "mp4"
+              width: 3840
+              height: 2160
+              elements: "{{ largeElementsArray }}"
+
+        # Multiple status checks to test connection pooling
+        - loop:
+            - get:
+                url: "/api/health"
+          count: 5

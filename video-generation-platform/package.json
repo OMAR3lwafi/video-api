@@ -1,0 +1,91 @@
+{
+  "name": "video-generation-platform",
+  "version": "1.0.0",
+  "description": "Dynamic Video Content Generation Platform - Full Stack Application",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend",
+    "database",
+    "orchestrator"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\" \"npm run dev:database\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:database": "cd database && npm run start",
+    "dev:orchestrator": "cd orchestrator && npm run dev",
+    "dev:all": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\" \"npm run dev:database\" \"npm run dev:orchestrator\"",
+    "build": "npm run build:backend && npm run build:frontend",
+    "build:backend": "cd backend && npm run build",
+    "build:frontend": "cd frontend && npm run build",
+    "test": "npm run test:backend && npm run test:frontend",
+    "test:backend": "cd backend && npm test",
+    "test:frontend": "cd frontend && npm test",
+    "test:database": "cd database && npm test",
+    "lint": "npm run lint:backend && npm run lint:frontend",
+    "lint:backend": "cd backend && npm run lint",
+    "lint:frontend": "cd frontend && npm run lint",
+    "lint:fix": "npm run lint:fix:backend && npm run lint:fix:frontend",
+    "lint:fix:backend": "cd backend && npm run lint:fix",
+    "lint:fix:frontend": "cd frontend && npm run lint:fix",
+    "format": "prettier --write \"**/*.{js,ts,tsx,json,md,yml,yaml}\"",
+    "clean": "npm run clean:backend && npm run clean:frontend",
+    "clean:backend": "cd backend && npm run clean",
+    "clean:frontend": "cd frontend && rm -rf dist",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up",
+    "docker:up:build": "docker-compose up --build",
+    "docker:up:dev": "docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build",
+    "docker:down": "docker-compose down",
+    "docker:down:volumes": "docker-compose down -v",
+    "docker:logs": "docker-compose logs -f",
+    "docker:restart": "docker-compose restart",
+    "setup": "npm install && npm run setup:backend && npm run setup:frontend && npm run setup:database",
+    "setup:backend": "cd backend && npm install",
+    "setup:frontend": "cd frontend && npm install",
+    "setup:database": "cd database && npm install",
+    "setup:orchestrator": "cd orchestrator && npm install",
+    "migrate:up": "cd database && npm run migrate:up",
+    "migrate:down": "cd database && npm run migrate:down",
+    "seed": "cd database && npm run seed",
+    "db:reset": "cd database && npm run reset",
+    "types:generate": "cd database && npm run types:generate",
+    "health": "curl -f http://localhost:3000/health && curl -f http://localhost:5173/health",
+    "monitoring:up": "docker-compose --profile monitoring up -d prometheus grafana",
+    "monitoring:down": "docker-compose --profile monitoring down"
+  },
+  "keywords": [
+    "video",
+    "generation",
+    "api",
+    "react",
+    "typescript",
+    "express",
+    "supabase",
+    "aws",
+    "s3",
+    "ffmpeg",
+    "docker"
+  ],
+  "author": "Video Generation Platform Team",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "prettier": "^3.1.0",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/video-generation-platform.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/video-generation-platform/issues"
+  },
+  "homepage": "https://github.com/your-org/video-generation-platform#readme"
+}

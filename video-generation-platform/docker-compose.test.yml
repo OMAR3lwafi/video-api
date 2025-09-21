@@ -1,0 +1,376 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database for testing
+  postgres:
+    image: postgres:15-alpine
+    container_name: video-platform-test-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: video_platform_test
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+      - ./database/test-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./database/test-data.sql:/docker-entrypoint-initdb.d/02-test-data.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d video_platform_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  # Redis for caching and session management in tests
+  redis:
+    image: redis:7-alpine
+    container_name: video-platform-test-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_test_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - test-network
+
+  # MinIO for S3-compatible storage testing
+  minio:
+    image: minio/minio:latest
+    container_name: video-platform-test-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: testuser
+      MINIO_ROOT_PASSWORD: testpassword123
+      MINIO_DEFAULT_BUCKETS: "video-test-bucket"
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_test_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - test-network
+
+  # Create test buckets in MinIO
+  minio-setup:
+    image: minio/mc:latest
+    container_name: video-platform-test-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set testminio http://minio:9000 testuser testpassword123;
+      mc mb testminio/video-test-bucket --ignore-existing;
+      mc mb testminio/uploads --ignore-existing;
+      mc mb testminio/processed --ignore-existing;
+      mc anonymous set public testminio/video-test-bucket;
+      mc anonymous set public testminio/uploads;
+      mc anonymous set public testminio/processed;
+      echo 'MinIO test buckets created successfully';
+      "
+    networks:
+      - test-network
+
+  # Backend service for integration and E2E testing
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: video-platform-test-backend
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: test
+      PORT: 3000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/video_platform_test
+      REDIS_URL: redis://redis:6379/1
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: video-test-bucket
+      AWS_ACCESS_KEY_ID: testuser
+      AWS_SECRET_ACCESS_KEY: testpassword123
+      AWS_S3_ENDPOINT: http://minio:9000
+      AWS_S3_FORCE_PATH_STYLE: true
+      JWT_SECRET: test-jwt-secret-key-for-testing-only
+      ENCRYPTION_KEY: test-encryption-key-32-characters!
+      CORS_ORIGIN: "*"
+      API_RATE_LIMIT: 1000
+      FILE_SIZE_LIMIT: 104857600
+      VIDEO_PROCESSING_TIMEOUT: 300000
+      LOG_LEVEL: error
+      SUPABASE_URL: http://postgres:5432
+      SUPABASE_ANON_KEY: test-anon-key
+      SUPABASE_SERVICE_ROLE_KEY: test-service-key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+      - backend_tmp:/tmp
+    working_dir: /app
+    command: npm run dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  # Frontend service for E2E testing
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: video-platform-test-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      NODE_ENV: test
+      VITE_API_BASE_URL: http://backend:3000
+      VITE_WS_BASE_URL: ws://backend:3000
+      VITE_APP_NAME: "Video Platform Test"
+      VITE_APP_VERSION: "1.0.0-test"
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/dist
+    working_dir: /app
+    command: npm run dev -- --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5173"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  # Nginx for load balancing and reverse proxy testing
+  nginx:
+    image: nginx:alpine
+    container_name: video-platform-test-nginx
+    ports:
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ./nginx/test.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - test-network
+
+  # Test runner service for automated testing
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: video-platform-test-runner
+    environment:
+      NODE_ENV: test
+      CI: true
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/video_platform_test
+      REDIS_URL: redis://redis:6379/1
+      API_BASE_URL: http://backend:3000
+      FRONTEND_BASE_URL: http://frontend:5173
+      PLAYWRIGHT_BASE_URL: http://nginx:80
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    volumes:
+      - .:/workspace
+      - test_results:/workspace/test-results
+      - test_node_modules:/workspace/node_modules
+    working_dir: /workspace
+    profiles:
+      - testing
+    networks:
+      - test-network
+
+  # Performance monitoring for load tests
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: video-platform-test-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus-test.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_test_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=1h'
+      - '--web.enable-lifecycle'
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - test-network
+
+  # Grafana for performance visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: video-platform-test-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: testpassword
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_test_data:/var/lib/grafana
+      - ./monitoring/grafana-test-dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana-test-datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - test-network
+
+  # Jaeger for distributed tracing in tests
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: video-platform-test-jaeger
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+    environment:
+      COLLECTOR_ZIPKIN_HTTP_PORT: 9411
+      SPAN_STORAGE_TYPE: memory
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:16686"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - test-network
+
+  # Elasticsearch for log aggregation in tests
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    container_name: video-platform-test-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_test_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  # Kibana for log visualization
+  kibana:
+    image: kibana:8.11.0
+    container_name: video-platform-test-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      SERVER_NAME: kibana-test
+      SERVER_PUBLICBASEURL: http://localhost:5601
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5601/api/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  # MailHog for email testing
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: video-platform-test-mailhog
+    ports:
+      - "1025:1025"  # SMTP server
+      - "8025:8025"  # Web UI
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8025"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - test-network
+
+# Named volumes for persistent data
+volumes:
+  postgres_test_data:
+    driver: local
+  redis_test_data:
+    driver: local
+  minio_test_data:
+    driver: local
+  backend_tmp:
+    driver: local
+  test_results:
+    driver: local
+  test_node_modules:
+    driver: local
+  prometheus_test_data:
+    driver: local
+  grafana_test_data:
+    driver: local
+  elasticsearch_test_data:
+    driver: local
+
+# Networks for service communication
+networks:
+  test-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

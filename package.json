@@ -1,0 +1,65 @@
+{
+  "name": "dynamic-video-content-platform",
+  "version": "1.0.0",
+  "description": "Dynamic Video Content Generation Platform with intelligent dual response system, AWS S3 storage, and real-time progress tracking",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "type-check": "tsc --noEmit",
+    "db:migrate": "cd database/migrations && psql $DATABASE_URL -f migrate.sql",
+    "db:rollback": "cd database && psql $DATABASE_URL -f rollback.sql",
+    "db:reset": "npm run db:rollback && npm run db:migrate",
+    "supabase:start": "supabase start",
+    "supabase:stop": "supabase stop",
+    "supabase:reset": "supabase db reset",
+    "supabase:migrate": "supabase db push",
+    "supabase:generate-types": "supabase gen types typescript --local > src/lib/database.types.ts",
+    "db:validate": "ts-node scripts/db_validation.ts",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "docker:build": "docker build -t video-platform .",
+    "docker:run": "docker run -p 3000:3000 video-platform",
+    "docker:compose": "docker-compose up --build"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.38.5",
+    "next": "^14.0.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "typescript": "^5.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "dotenv": "^17.2.2",
+    "eslint": "^8.56.0",
+    "eslint-config-next": "^14.0.4",
+    "prettier": "^3.1.1",
+    "supabase": "^1.123.4",
+    "ts-node": "^10.9.2"
+  },
+  "keywords": [
+    "video",
+    "processing",
+    "supabase",
+    "real-time",
+    "aws-s3",
+    "typescript",
+    "next.js"
+  ],
+  "author": "Dynamic Video Content Platform Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/dynamic-video-platform.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/dynamic-video-platform/issues"
+  },
+  "homepage": "https://github.com/your-org/dynamic-video-platform#readme"
+}

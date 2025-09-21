@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video API Documentation - Interactive Swagger UI</title>
+  <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5.10.3/swagger-ui.css" />
+  <link rel="icon" type="image/png" href="https://unpkg.com/swagger-ui-dist@5.10.3/favicon-32x32.png" sizes="32x32" />
+  <link rel="icon" type="image/png" href="https://unpkg.com/swagger-ui-dist@5.10.3/favicon-16x16.png" sizes="16x16" />
+  <style>
+    html {
+      box-sizing: border-box;
+      overflow: -moz-scrollbars-vertical;
+      overflow-y: scroll;
+    }
+
+    *, *:before, *:after {
+      box-sizing: inherit;
+    }
+
+    body {
+      margin: 0;
+      background: #fafafa;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+
+    .swagger-ui .topbar {
+      background-color: #1f2937;
+      border-bottom: 3px solid #3b82f6;
+    }
+
+    .swagger-ui .topbar .download-url-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .swagger-ui .topbar .download-url-wrapper .select-label {
+      color: white;
+      font-weight: 500;
+    }
+
+    .custom-header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 20px 0;
+      text-align: center;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    }
+
+    .custom-header h1 {
+      margin: 0;
+      font-size: 2.5rem;
+      font-weight: 300;
+    }
+
+    .custom-header p {
+      margin: 10px 0 0 0;
+      font-size: 1.1rem;
+      opacity: 0.9;
+    }
+
+    .version-selector {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 5px;
+      color: white;
+      padding: 8px 12px;
+      margin: 15px auto 0;
+      display: block;
+      max-width: 200px;
+    }
+
+    .version-selector option {
+      background: #1f2937;
+      color: white;
+    }
+
+    .swagger-ui .info {
+      margin-bottom: 2rem;
+    }
+
+    .swagger-ui .info .title {
+      font-size: 2rem;
+      margin-bottom: 0.5rem;
+      color: #1f2937;
+    }
+
+    .swagger-ui .info .description {
+      font-size: 1rem;
+      line-height: 1.6;
+      color: #4b5563;
+    }
+
+    .environment-notice {
+      background: #fef3c7;
+      border: 1px solid #f59e0b;
+      border-radius: 6px;
+      padding: 12px;
+      margin: 20px;
+      text-align: center;
+      font-weight: 500;
+      color: #92400e;
+    }
+
+    .environment-notice.production {
+      background: #dcfce7;
+      border-color: #16a34a;
+      color: #15803d;
+    }
+
+    .environment-notice.development {
+      background: #fef3c7;
+      border-color: #f59e0b;
+      color: #92400e;
+    }
+
+    .auth-section {
+      background: #f8fafc;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px;
+    }
+
+    .auth-section h3 {
+      margin-top: 0;
+      color: #1f2937;
+    }
+
+    .auth-instructions {
+      color: #4b5563;
+      margin-bottom: 15px;
+    }
+
+    .auth-example {
+      background: #1f2937;
+      color: #e5e7eb;
+      padding: 15px;
+      border-radius: 6px;
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      font-size: 0.9rem;
+      margin-bottom: 15px;
+    }
+
+    .quick-links {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+
+    .quick-links h3 {
+      margin-top: 0;
+      color: #1f2937;
+      border-bottom: 2px solid #3b82f6;
+      padding-bottom: 10px;
+    }
+
+    .quick-links ul {
+      list-style: none;
+      padding: 0;
+    }
+
+    .quick-links li {
+      margin: 10px 0;
+    }
+
+    .quick-links a {
+      color: #3b82f6;
+      text-decoration: none;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .quick-links a:hover {
+      color: #1d4ed8;
+      text-decoration: underline;
+    }
+
+    .quick-links .tag {
+      background: #f3f4f6;
+      color: #374151;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+
+    @media (max-width: 768px) {
+      .custom-header h1 {
+        font-size: 2rem;
+      }
+
+      .auth-section, .quick-links {
+        margin: 10px;
+        padding: 15px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="custom-header">
+    <h1>🎬 Video API Documentation</h1>
+    <p>Dynamic Video Content Generation Platform - Interactive API Explorer</p>
+    <select class="version-selector" id="versionSelector">
+      <option value="v1.0.0">Version 1.0.0 (Current)</option>
+      <option value="v0.9.0">Version 0.9.0 (Beta)</option>
+    </select>
+  </div>
+
+  <div id="environmentNotice" class="environment-notice development">
+    🔧 Development Environment - API responses may include debug information
+  </div>
+
+  <div class="auth-section">
+    <h3>🔐 Authentication</h3>
+    <div class="auth-instructions">
+      This API supports two authentication methods. Click "Authorize" above to configure:
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 15px;">
+      <div>
+        <h4 style="margin: 0 0 10px 0; color: #374151;">Bearer Token (JWT)</h4>
+        <div class="auth-example">Authorization: Bearer eyJhbGciOiJIUzI1NiIs...</div>
+      </div>
+      <div>
+        <h4 style="margin: 0 0 10px 0; color: #374151;">API Key</h4>
+        <div class="auth-example">X-API-Key: vapi_abc123def456...</div>
+      </div>
+    </div>
+
+    <p style="font-size: 0.9rem; color: #6b7280; margin: 0;">
+      💡 <strong>Tip:</strong> Most endpoints require authentication. Public endpoints (like health checks) are marked with an unlocked icon.
+    </p>
+  </div>
+
+  <div class="quick-links">
+    <h3>🚀 Quick Start Guide</h3>
+    <ul>
+      <li>
+        <a href="#/Video%20Processing/post_videocreate">
+          <span class="tag">POST</span>
+          Create Video - Start here to create your first video
+        </a>
+      </li>
+      <li>
+        <a href="#/Video%20Processing/get_videoresult__jobId_">
+          <span class="tag">GET</span>
+          Check Status - Monitor your video processing
+        </a>
+      </li>
+      <li>
+        <a href="#/Health/get_health">
+          <span class="tag">GET</span>
+          Health Check - Verify API availability
+        </a>
+      </li>
+      <li>
+        <a href="#/Video%20Management/get_video_jobs">
+          <span class="tag">GET</span>
+          List Jobs - View your processing history
+        </a>
+      </li>
+    </ul>
+
+    <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
+      <h4 style="margin: 0 0 10px 0; color: #374151;">📚 Additional Resources</h4>
+      <ul style="font-size: 0.9rem;">
+        <li><a href="https://docs.videogeneration.platform" target="_blank">📖 Complete Documentation</a></li>
+        <li><a href="https://github.com/videogeneration/platform-examples" target="_blank">💻 Code Examples</a></li>
+        <li><a href="https://status.videogeneration.platform" target="_blank">📊 API Status</a></li>
+        <li><a href="mailto:api-support@videogeneration.platform">📧 Support Contact</a></li>
+      </ul>
+    </div>
+  </div>
+
+  <div id="swagger-ui"></div>
+
+  <script src="https://unpkg.com/swagger-ui-dist@5.10.3/swagger-ui-bundle.js" charset="UTF-8"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.10.3/swagger-ui-standalone-preset.js" charset="UTF-8"></script>
+
+  <script>
+    // Configuration object for different environments
+    const config = {
+      development: {
+        url: '../openapi/video-api.yaml',
+        serverUrl: 'http://localhost:3000/api/v1',
+        environment: 'development'
+      },
+      staging: {
+        url: 'https://staging-docs.videogeneration.platform/openapi/video-api.yaml',
+        serverUrl: 'https://staging-api.videogeneration.platform/api/v1',
+        environment: 'staging'
+      },
+      production: {
+        url: 'https://docs.videogeneration.platform/openapi/video-api.yaml',
+        serverUrl: 'https://api.videogeneration.platform/api/v1',
+        environment: 'production'
+      }
+    };
+
+    // Determine environment based on hostname
+    function getEnvironment() {
+      const hostname = window.location.hostname;
+      if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return 'development';
+      } else if (hostname.includes('staging')) {
+        return 'staging';
+      } else {
+        return 'production';
+      }
+    }
+
+    const currentEnv = getEnvironment();
+    const envConfig = config[currentEnv];
+
+    // Update environment notice
+    const envNotice = document.getElementById('environmentNotice');
+    switch (currentEnv) {
+      case 'production':
+        envNotice.className = 'environment-notice production';
+        envNotice.innerHTML = '🚀 Production Environment - Live API with rate limiting';
+        break;
+      case 'staging':
+        envNotice.className = 'environment-notice staging';
+        envNotice.innerHTML = '🧪 Staging Environment - Pre-production testing environment';
+        break;
+      default:
+        envNotice.className = 'environment-notice development';
+        envNotice.innerHTML = '🔧 Development Environment - API responses may include debug information';
+    }
+
+    // Initialize Swagger UI
+    window.onload = function() {
+      const ui = SwaggerUIBundle({
+        url: envConfig.url,
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset
+        ],
+        plugins: [
+          SwaggerUIBundle.plugins.DownloadUrl
+        ],
+        layout: "StandaloneLayout",
+
+        // Custom configuration
+        supportedSubmitMethods: ['get', 'post', 'put', 'delete', 'patch'],
+        operationsSorter: "alpha",
+        tagsSorter: "alpha",
+        docExpansion: "list",
+        defaultModelsExpandDepth: 2,
+        defaultModelExpandDepth: 2,
+        displayRequestDuration: true,
+        tryItOutEnabled: true,
+        filter: true,
+
+        // Custom request interceptor for correlation IDs and debugging
+        requestInterceptor: function(request) {
+          // Add correlation ID for request tracking
+          const correlationId = 'req_' + Math.random().toString(36).substr(2, 9);
+          request.headers['X-Correlation-ID'] = correlationId;
+
+          // Add environment header for debugging
+          request.headers['X-Client-Environment'] = currentEnv;
+          request.headers['X-Client-Source'] = 'swagger-ui';
+
+          console.log(`🚀 API Request [${correlationId}]:`, {
+            method: request.method,
+            url: request.url,
+            headers: request.headers
+          });
+
+          return request;
+        },
+
+        // Custom response interceptor for enhanced debugging
+        responseInterceptor: function(response) {
+          const correlationId = response.headers['x-correlation-id'] || 'unknown';
+
+          console.log(`📨 API Response [${correlationId}]:`, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+            url: response.url
+          });
+
+          return response;
+        },
+
+        // OAuth2 and API Key configuration
+        initOAuth: {
+          clientId: "swagger-ui",
+          appName: "Video API Documentation",
+          scopeSeparator: " ",
+          scopes: "video:create video:read video:manage",
+          additionalQueryStringParams: {
+            audience: "video-api"
+          }
+        },
+
+        // Persist authorization across page refreshes
+        persistAuthorization: true,
+
+        // Custom validators
+        validatorUrl: null, // Disable online validator for private APIs
+
+        // Custom UI configuration
+        showExtensions: true,
+        showCommonExtensions: true,
+
+        // Error handling
+        onComplete: function() {
+          console.log('✅ Swagger UI loaded successfully');
+
+          // Add custom styling after load
+          setTimeout(() => {
+            // Enhance the authorize button
+            const authorizeBtn = document.querySelector('.authorize');
+            if (authorizeBtn) {
+              authorizeBtn.style.background = '#3b82f6';
+              authorizeBtn.style.borderColor = '#3b82f6';
+            }
+
+            // Add tooltips to operation buttons
+            const operations = document.querySelectorAll('.opblock-summary');
+            operations.forEach(op => {
+              const method = op.querySelector('.opblock-summary-method');
+              if (method) {
+                const methodText = method.textContent.toUpperCase();
+                let tooltip = '';
+                switch (methodText) {
+                  case 'POST':
+                    tooltip = 'Create or submit data';
+                    break;
+                  case 'GET':
+                    tooltip = 'Retrieve data';
+                    break;
+                  case 'PUT':
+                    tooltip = 'Update or replace data';
+                    break;
+                  case 'DELETE':
+                    tooltip = 'Remove data';
+                    break;
+                  case 'PATCH':
+                    tooltip = 'Partially update data';
+                    break;
+                }
+                method.title = tooltip;
+              }
+            });
+          }, 1000);
+        },
+
+        onFailure: function(error) {
+          console.error('❌ Failed to load API specification:', error);
+
+          // Show user-friendly error message
+          const swaggerContainer = document.getElementById('swagger-ui');
+          swaggerContainer.innerHTML = `
+            <div style="text-align: center; padding: 50px; color: #dc2626;">
+              <h2>🚨 Failed to Load API Documentation</h2>
+              <p>Unable to load the OpenAPI specification. Please check:</p>
+              <ul style="text-align: left; display: inline-block; margin: 20px 0;">
+                <li>Network connection</li>
+                <li>API specification file availability</li>
+                <li>CORS configuration</li>
+              </ul>
+              <button onclick="window.location.reload()" style="
+                background: #3b82f6;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 5px;
+                cursor: pointer;
+              ">
+                🔄 Retry
+              </button>
+            </div>
+          `;
+        }
+      });
+
+      // Version selector functionality
+      document.getElementById('versionSelector').addEventListener('change', function(e) {
+        const version = e.target.value;
+        console.log('🔄 Switching to API version:', version);
+
+        // In a real implementation, this would load different spec files
+        // For now, we'll just show a notification
+        alert(`🚧 Version switching to ${version} - Feature coming soon!`);
+      });
+
+      // Add keyboard shortcuts
+      document.addEventListener('keydown', function(e) {
+        // Ctrl/Cmd + K to focus search
+        if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+          e.preventDefault();
+          const searchInput = document.querySelector('.download-url-input');
+          if (searchInput) {
+            searchInput.focus();
+          }
+        }
+
+        // Ctrl/Cmd + / to toggle all operations
+        if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+          e.preventDefault();
+          const expandButton = document.querySelector('.expand-operation');
+          if (expandButton) {
+            expandButton.click();
+          }
+        }
+      });
+    };
+
+    // Add global error handling for network issues
+    window.addEventListener('error', function(e) {
+      console.error('💥 Global error:', e.error);
+    });
+
+    // Add connection status monitoring
+    window.addEventListener('online', function() {
+      console.log('🟢 Connection restored');
+      const notice = document.createElement('div');
+      notice.style.cssText = `
+        position: fixed; top: 20px; right: 20px; z-index: 9999;
+        background: #10b981; color: white; padding: 10px 20px;
+        border-radius: 5px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      `;
+      notice.textContent = '🟢 Connection restored';
+      document.body.appendChild(notice);
+      setTimeout(() => notice.remove(), 3000);
+    });
+
+    window.addEventListener('offline', function() {
+      console.log('🔴 Connection lost');
+      const notice = document.createElement('div');
+      notice.style.cssText = `
+        position: fixed; top: 20px; right: 20px; z-index: 9999;
+        background: #dc2626; color: white; padding: 10px 20px;
+        border-radius: 5px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      `;
+      notice.textContent = '🔴 Connection lost - Working offline';
+      document.body.appendChild(notice);
+    });
+  </script>
+</body>
+</html>

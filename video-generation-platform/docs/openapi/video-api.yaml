@@ -1,0 +1,1515 @@
+openapi: 3.0.3
+info:
+  title: Dynamic Video Content Generation Platform API
+  version: "1.0.0"
+  description: |
+    Professional API for dynamic video content generation with intelligent dual response system,
+    AWS S3 storage, real-time progress tracking, and advanced orchestration capabilities.
+
+    ## Features
+    - **Dual Response System**: Quick processing (≤30 seconds) returns immediate results, longer jobs return async tracking
+    - **Real-time Updates**: WebSocket and Server-Sent Events for live progress monitoring
+    - **AWS S3 Integration**: Secure file storage with public URLs
+    - **Advanced Orchestration**: Intelligent resource management and load balancing
+    - **Multi-element Composition**: Support for up to 10 video/image elements per job
+
+    ## Rate Limits
+    - Upload endpoints: 10 requests per minute per IP
+    - Status check endpoints: 100 requests per minute per IP
+    - General API endpoints: 1000 requests per hour per IP
+
+    ## Processing Limits
+    - Maximum video input duration: 10 minutes
+    - Maximum processing time: 10 minutes for async jobs
+    - Maximum elements per job: 10
+    - Supported formats: MP4, MOV, AVI
+    - Maximum resolution: 7680x4320 (8K)
+  contact:
+    name: Video Generation Platform API Support
+    email: api-support@videogeneration.platform
+    url: https://docs.videogeneration.platform
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: https://videogeneration.platform/terms
+
+servers:
+  - url: https://api.videogeneration.platform/api/v1
+    description: Production server
+  - url: https://staging-api.videogeneration.platform/api/v1
+    description: Staging server
+  - url: http://localhost:3000/api/v1
+    description: Development server
+
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+
+paths:
+  /:
+    get:
+      summary: API Information
+      description: Get basic API information and available endpoints
+      tags:
+        - General
+      security: []
+      responses:
+        "200":
+          description: API information retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiInfoResponse"
+              example:
+                message: "Dynamic Video Content Generation Platform API v1"
+                version: "1.0.0"
+                timestamp: "2024-01-15T10:30:00.000Z"
+                endpoints:
+                  health: "/api/v1/health"
+                  video: "/api/v1/video"
+                  videocreate: "/api/v1/videocreate"
+                  videoresult: "/api/v1/videoresult/:jobId"
+                documentation: "https://docs.videogeneration.platform"
+
+  /health:
+    get:
+      summary: Basic Health Check
+      description: Basic health check endpoint for monitoring service availability
+      tags:
+        - Health
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BasicHealthResponse"
+              example:
+                ok: true
+                timestamp: "2024-01-15T10:30:00.000Z"
+                version: "1.0.0"
+                uptime: 86400
+        "503":
+          description: Service is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BasicHealthResponse"
+              example:
+                ok: false
+                timestamp: "2024-01-15T10:30:00.000Z"
+                version: "1.0.0"
+                uptime: 86400
+
+  /health/detailed:
+    get:
+      summary: Detailed Health Check
+      description: Comprehensive health check including all dependent services
+      tags:
+        - Health
+      security: []
+      responses:
+        "200":
+          description: Detailed health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailedHealthResponse"
+              example:
+                ok: true
+                timestamp: "2024-01-15T10:30:00.000Z"
+                version: "1.0.0"
+                uptime: 86400
+                services:
+                  database:
+                    status: "healthy"
+                    responseTime: 12
+                    lastCheck: "2024-01-15T10:29:55.000Z"
+                  s3:
+                    status: "healthy"
+                    responseTime: 45
+                    lastCheck: "2024-01-15T10:29:55.000Z"
+                  ffmpeg:
+                    status: "healthy"
+                    responseTime: 8
+                    lastCheck: "2024-01-15T10:29:55.000Z"
+
+  /health/ready:
+    get:
+      summary: Readiness Check
+      description: Kubernetes readiness probe endpoint
+      tags:
+        - Health
+      security: []
+      responses:
+        "200":
+          description: Service is ready to accept requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+        "503":
+          description: Service is not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+
+  /health/live:
+    get:
+      summary: Liveness Check
+      description: Kubernetes liveness probe endpoint
+      tags:
+        - Health
+      security: []
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LivenessResponse"
+        "503":
+          description: Service is not responding
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LivenessResponse"
+
+  /videocreate:
+    post:
+      summary: Create Video (Primary Endpoint)
+      description: |
+        Create a new video processing job with intelligent dual response system.
+
+        **Processing Behavior:**
+        - Jobs estimated to complete in ≤30 seconds return immediate results
+        - Jobs estimated to take >30 seconds return async tracking information
+        - Progress can be monitored via `/videoresult/{jobId}` endpoint
+        - Real-time updates available via Server-Sent Events
+
+        **Element Positioning:**
+        - Use percentage values for responsive positioning (e.g., "50%" for center)
+        - Track numbers determine layer order (higher tracks appear on top)
+        - Fit modes control how content is scaled within specified dimensions
+      tags:
+        - Video Processing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VideoCreateRequest"
+            examples:
+              simple_overlay:
+                summary: Simple image overlay on video
+                value:
+                  output_format: "mp4"
+                  width: 1920
+                  height: 1080
+                  elements:
+                    - id: "background_video"
+                      type: "video"
+                      source: "https://example.com/background.mp4"
+                      track: 0
+                    - id: "logo_overlay"
+                      type: "image"
+                      source: "https://example.com/logo.png"
+                      track: 1
+                      x: "80%"
+                      y: "10%"
+                      width: "15%"
+                      height: "15%"
+                      fit_mode: "contain"
+              complex_composition:
+                summary: Multi-element video composition
+                value:
+                  output_format: "mp4"
+                  width: 1920
+                  height: 1080
+                  elements:
+                    - id: "main_video"
+                      type: "video"
+                      source: "https://example.com/main.mp4"
+                      track: 0
+                    - id: "pip_video"
+                      type: "video"
+                      source: "https://example.com/speaker.mp4"
+                      track: 1
+                      x: "70%"
+                      y: "70%"
+                      width: "25%"
+                      height: "25%"
+                      fit_mode: "cover"
+                    - id: "title_image"
+                      type: "image"
+                      source: "https://example.com/title.png"
+                      track: 2
+                      x: "10%"
+                      y: "10%"
+                      width: "30%"
+                      height: "10%"
+                      fit_mode: "contain"
+      responses:
+        "200":
+          description: Video processing completed (≤30 seconds)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImmediateResponse"
+              example:
+                status: "completed"
+                processing_time: "24.5s"
+                result_url: "https://cdn.videogeneration.platform/videos/abc123/output.mp4"
+                job_id: "job_abc123def456"
+                file_size: "15.2 MB"
+                message: "Video processing completed successfully"
+        "202":
+          description: Video processing started (>30 seconds expected)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncResponse"
+              example:
+                status: "processing"
+                job_id: "job_abc123def456"
+                message: "Video processing started. Check status for updates."
+                estimated_completion: "2024-01-15T10:35:00.000Z"
+                status_check_endpoint: "/api/v1/videoresult/job_abc123def456"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /videoresult/{jobId}:
+    get:
+      summary: Get Video Processing Result
+      description: |
+        Retrieve the status and result of a video processing job.
+
+        **Status Values:**
+        - `processing`: Job is currently being processed
+        - `completed`: Job finished successfully, result_url available
+        - `failed`: Job failed, error details in error field
+        - `cancelled`: Job was cancelled by user request
+
+        **Progress Tracking:**
+        - Progress percentage (0-100) when available
+        - Current processing step description
+        - Estimated time remaining for completion
+      tags:
+        - Video Processing
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          description: Unique identifier for the video processing job
+          schema:
+            type: string
+            pattern: "^job_[a-zA-Z0-9]+$"
+          example: "job_abc123def456"
+      responses:
+        "200":
+          description: Job status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatusResponse"
+              examples:
+                processing:
+                  summary: Job in progress
+                  value:
+                    status: "processing"
+                    job_id: "job_abc123def456"
+                    progress: "65%"
+                    current_step: "Encoding final video"
+                    message: "Video processing in progress"
+                    estimated_time_remaining: "2m 30s"
+                completed:
+                  summary: Job completed
+                  value:
+                    status: "completed"
+                    job_id: "job_abc123def456"
+                    message: "Video processing completed successfully"
+                    result_url: "https://cdn.videogeneration.platform/videos/abc123/output.mp4"
+                    file_size: "15.2 MB"
+                    duration: "00:02:45"
+                    processing_time: "5m 23s"
+                failed:
+                  summary: Job failed
+                  value:
+                    status: "failed"
+                    job_id: "job_abc123def456"
+                    message: "Video processing failed"
+                    error: "Invalid video codec in source file"
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /video/create:
+    post:
+      summary: Create Video (Alternative Endpoint)
+      description: Alternative endpoint for video creation (same functionality as /videocreate)
+      tags:
+        - Video Processing
+      requestBody:
+        $ref: "#/components/requestBodies/VideoCreateRequest"
+      responses:
+        "200":
+          description: Video processing completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImmediateResponse"
+        "202":
+          description: Video processing started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /video/result/{jobId}:
+    get:
+      summary: Get Job Status (Alternative Endpoint)
+      description: Alternative endpoint for job status (same functionality as /videoresult/{jobId})
+      tags:
+        - Video Processing
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Job status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatusResponse"
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /video/job/{jobId}:
+    delete:
+      summary: Cancel Video Processing Job
+      description: Cancel a video processing job that is currently in progress
+      tags:
+        - Video Management
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Job cancelled successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobCancelResponse"
+              example:
+                success: true
+                message: "Job cancelled successfully"
+                job_id: "job_abc123def456"
+                status: "cancelled"
+                timestamp: "2024-01-15T10:30:00.000Z"
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+        "409":
+          description: Job cannot be cancelled (already completed or failed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+              example:
+                error: "INVALID_OPERATION"
+                message: "Cannot cancel job that is already completed"
+                statusCode: 409
+                timestamp: "2024-01-15T10:30:00.000Z"
+                correlationId: "req_123abc"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /video/jobs:
+    get:
+      summary: List Video Processing Jobs
+      description: |
+        Retrieve a paginated list of video processing jobs for the authenticated user.
+
+        **Filtering:**
+        - Filter by job status (pending, processing, completed, failed, cancelled)
+        - Sort by creation date, update date, or status
+        - Configurable page size and pagination
+      tags:
+        - Video Management
+      parameters:
+        - name: page
+          in: query
+          description: Page number (1-based)
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: limit
+          in: query
+          description: Number of items per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          example: 20
+        - name: status
+          in: query
+          description: Filter by job status
+          schema:
+            type: string
+            enum: [pending, processing, completed, failed, cancelled]
+          example: "completed"
+        - name: sort
+          in: query
+          description: Sort field
+          schema:
+            type: string
+            enum: [created_at, updated_at, status]
+            default: "created_at"
+          example: "created_at"
+        - name: order
+          in: query
+          description: Sort order
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: "desc"
+          example: "desc"
+      responses:
+        "200":
+          description: Jobs retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobListResponse"
+              example:
+                data:
+                  - job_id: "job_abc123def456"
+                    status: "completed"
+                    created_at: "2024-01-15T10:00:00.000Z"
+                    updated_at: "2024-01-15T10:05:23.000Z"
+                    output_format: "mp4"
+                    width: 1920
+                    height: 1080
+                    elements_count: 2
+                    file_size: "15.2 MB"
+                    processing_time: "5m 23s"
+                    result_url: "https://cdn.videogeneration.platform/videos/abc123/output.mp4"
+                  - job_id: "job_def456ghi789"
+                    status: "processing"
+                    created_at: "2024-01-15T09:45:00.000Z"
+                    updated_at: "2024-01-15T10:30:00.000Z"
+                    output_format: "mp4"
+                    width: 3840
+                    height: 2160
+                    elements_count: 5
+                    progress: "78%"
+                    current_step: "Applying visual effects"
+                    estimated_completion: "2024-01-15T10:35:00.000Z"
+                pagination:
+                  page: 1
+                  limit: 20
+                  total: 45
+                  totalPages: 3
+                  hasNext: true
+                  hasPrev: false
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /video/job/{jobId}/details:
+    get:
+      summary: Get Detailed Job Information
+      description: |
+        Get comprehensive information about a video processing job including processing timeline,
+        performance metrics, and detailed configuration.
+      tags:
+        - Video Management
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Detailed job information retrieved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobDetailsResponse"
+              example:
+                job_id: "job_abc123def456"
+                status: "completed"
+                created_at: "2024-01-15T10:00:00.000Z"
+                updated_at: "2024-01-15T10:05:23.000Z"
+                started_at: "2024-01-15T10:00:05.000Z"
+                completed_at: "2024-01-15T10:05:23.000Z"
+                configuration:
+                  output_format: "mp4"
+                  width: 1920
+                  height: 1080
+                  elements:
+                    - id: "background_video"
+                      type: "video"
+                      source: "https://example.com/background.mp4"
+                      track: 0
+                    - id: "logo_overlay"
+                      type: "image"
+                      source: "https://example.com/logo.png"
+                      track: 1
+                      x: "80%"
+                      y: "10%"
+                      width: "15%"
+                      height: "15%"
+                      fit_mode: "contain"
+                result:
+                  url: "https://cdn.videogeneration.platform/videos/abc123/output.mp4"
+                  file_size: "15.2 MB"
+                  duration: "00:02:45"
+                  resolution: "1920x1080"
+                  bitrate: "5000 kbps"
+                  codec: "H.264"
+                metrics:
+                  total_processing_time: "5m 23s"
+                  queue_time: "5s"
+                  download_time: "1m 12s"
+                  processing_time: "3m 45s"
+                  upload_time: "21s"
+                  cpu_usage_avg: "85%"
+                  memory_usage_max: "2.3 GB"
+                timeline:
+                  - timestamp: "2024-01-15T10:00:00.000Z"
+                    event: "job_created"
+                    description: "Job created and queued for processing"
+                  - timestamp: "2024-01-15T10:00:05.000Z"
+                    event: "processing_started"
+                    description: "Started downloading source files"
+                  - timestamp: "2024-01-15T10:01:17.000Z"
+                    event: "files_downloaded"
+                    description: "All source files downloaded successfully"
+                  - timestamp: "2024-01-15T10:05:02.000Z"
+                    event: "processing_completed"
+                    description: "Video processing completed"
+                  - timestamp: "2024-01-15T10:05:23.000Z"
+                    event: "upload_completed"
+                    description: "Result uploaded to CDN"
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /video/job/{jobId}/subscribe:
+    get:
+      summary: Subscribe to Job Updates
+      description: |
+        Subscribe to real-time job status updates via Server-Sent Events (SSE).
+
+        **Event Types:**
+        - `status`: Job status changes
+        - `progress`: Progress percentage updates
+        - `step`: Processing step changes
+        - `completed`: Job completion with results
+        - `failed`: Job failure with error details
+      tags:
+        - Real-time Updates
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: SSE stream established
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                progress_event:
+                  summary: Progress update event
+                  value: |
+                    event: progress
+                    data: {"job_id":"job_abc123def456","progress":"45%","current_step":"Encoding video layers"}
+
+                completion_event:
+                  summary: Job completion event
+                  value: |
+                    event: completed
+                    data: {"job_id":"job_abc123def456","status":"completed","result_url":"https://cdn.videogeneration.platform/videos/abc123/output.mp4","file_size":"15.2 MB"}
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token for authenticated requests
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for service-to-service authentication
+
+  parameters:
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      description: Unique identifier for the video processing job
+      schema:
+        type: string
+        pattern: "^job_[a-zA-Z0-9]+$"
+        minLength: 10
+        maxLength: 50
+      example: "job_abc123def456"
+
+  requestBodies:
+    VideoCreateRequest:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/VideoCreateRequest"
+
+  responses:
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ValidationErrorResponse"
+          example:
+            error: "VALIDATION_ERROR"
+            message: "Request validation failed"
+            statusCode: 400
+            timestamp: "2024-01-15T10:30:00.000Z"
+            correlationId: "req_123abc"
+            details:
+              - field: "width"
+                message: "Width must be between 1 and 7680 pixels"
+                value: 8000
+              - field: "elements[0].source"
+                message: "Element source must be a valid URL"
+                value: "invalid-url"
+
+    PayloadTooLarge:
+      description: Request payload exceeds size limits
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+          example:
+            error: "PAYLOAD_TOO_LARGE"
+            message: "Request payload exceeds maximum size of 10MB"
+            statusCode: 413
+            timestamp: "2024-01-15T10:30:00.000Z"
+            correlationId: "req_123abc"
+
+    RateLimitExceeded:
+      description: Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+          description: Request limit per time window
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+          description: Remaining requests in current window
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+          description: Time when the rate limit resets (Unix timestamp)
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds to wait before retrying
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+          example:
+            error: "RATE_LIMIT_EXCEEDED"
+            message: "Rate limit exceeded. Try again in 60 seconds."
+            statusCode: 429
+            timestamp: "2024-01-15T10:30:00.000Z"
+            correlationId: "req_123abc"
+
+    JobNotFound:
+      description: Job not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+          example:
+            error: "JOB_NOT_FOUND"
+            message: "Video processing job not found"
+            statusCode: 404
+            timestamp: "2024-01-15T10:30:00.000Z"
+            correlationId: "req_123abc"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+          example:
+            error: "INTERNAL_SERVER_ERROR"
+            message: "An unexpected error occurred. Please try again later."
+            statusCode: 500
+            timestamp: "2024-01-15T10:30:00.000Z"
+            correlationId: "req_123abc"
+
+  schemas:
+    VideoElement:
+      type: object
+      required:
+        - id
+        - type
+        - source
+        - track
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the element
+          minLength: 1
+          maxLength: 100
+          example: "logo_overlay"
+        type:
+          type: string
+          enum: [video, image]
+          description: Type of media element
+          example: "image"
+        source:
+          type: string
+          format: uri
+          description: URL to the source file
+          example: "https://example.com/logo.png"
+        track:
+          type: integer
+          minimum: 0
+          maximum: 9
+          description: Layer track (higher numbers appear on top)
+          example: 1
+        x:
+          type: string
+          pattern: '^\d+(\.\d+)?%$'
+          description: Horizontal position as percentage
+          example: "80%"
+        y:
+          type: string
+          pattern: '^\d+(\.\d+)?%$'
+          description: Vertical position as percentage
+          example: "10%"
+        width:
+          type: string
+          pattern: '^\d+(\.\d+)?%$'
+          description: Width as percentage of output
+          example: "15%"
+        height:
+          type: string
+          pattern: '^\d+(\.\d+)?%$'
+          description: Height as percentage of output
+          example: "15%"
+        fit_mode:
+          type: string
+          enum: [auto, contain, cover, fill]
+          description: How content should fit within specified dimensions
+          default: "auto"
+          example: "contain"
+
+    VideoCreateRequest:
+      type: object
+      required:
+        - output_format
+        - width
+        - height
+        - elements
+      properties:
+        output_format:
+          type: string
+          enum: [mp4, mov, avi]
+          description: Output video format
+          example: "mp4"
+        width:
+          type: integer
+          minimum: 1
+          maximum: 7680
+          description: Output video width in pixels
+          example: 1920
+        height:
+          type: integer
+          minimum: 1
+          maximum: 4320
+          description: Output video height in pixels
+          example: 1080
+        elements:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/VideoElement"
+          description: Array of video/image elements to compose
+
+    ImmediateResponse:
+      type: object
+      required:
+        - status
+        - processing_time
+        - result_url
+        - job_id
+        - file_size
+        - message
+      properties:
+        status:
+          type: string
+          enum: [completed]
+          description: Processing status
+          example: "completed"
+        processing_time:
+          type: string
+          description: Total processing duration
+          example: "24.5s"
+        result_url:
+          type: string
+          format: uri
+          description: Public URL to the generated video
+          example: "https://cdn.videogeneration.platform/videos/abc123/output.mp4"
+        job_id:
+          type: string
+          description: Unique job identifier
+          example: "job_abc123def456"
+        file_size:
+          type: string
+          description: Size of the generated video file
+          example: "15.2 MB"
+        message:
+          type: string
+          description: Success message
+          example: "Video processing completed successfully"
+
+    AsyncResponse:
+      type: object
+      required:
+        - status
+        - job_id
+        - message
+        - estimated_completion
+        - status_check_endpoint
+      properties:
+        status:
+          type: string
+          enum: [processing]
+          description: Processing status
+          example: "processing"
+        job_id:
+          type: string
+          description: Unique job identifier for tracking
+          example: "job_abc123def456"
+        message:
+          type: string
+          description: Status message
+          example: "Video processing started. Check status for updates."
+        estimated_completion:
+          type: string
+          format: date-time
+          description: Estimated completion time (ISO 8601)
+          example: "2024-01-15T10:35:00.000Z"
+        status_check_endpoint:
+          type: string
+          description: Endpoint to check job status
+          example: "/api/v1/videoresult/job_abc123def456"
+
+    JobStatusResponse:
+      type: object
+      required:
+        - status
+        - job_id
+        - message
+      properties:
+        status:
+          type: string
+          enum: [processing, completed, failed, cancelled]
+          description: Current job status
+          example: "processing"
+        job_id:
+          type: string
+          description: Unique job identifier
+          example: "job_abc123def456"
+        progress:
+          type: string
+          pattern: '^\d+%$'
+          description: Processing progress percentage
+          example: "65%"
+        current_step:
+          type: string
+          description: Current processing step description
+          example: "Encoding final video"
+        message:
+          type: string
+          description: Status message
+          example: "Video processing in progress"
+        result_url:
+          type: string
+          format: uri
+          description: Public URL to generated video (when completed)
+          example: "https://cdn.videogeneration.platform/videos/abc123/output.mp4"
+        file_size:
+          type: string
+          description: Size of generated video file (when completed)
+          example: "15.2 MB"
+        duration:
+          type: string
+          description: Duration of generated video (when completed)
+          example: "00:02:45"
+        processing_time:
+          type: string
+          description: Total processing time (when completed)
+          example: "5m 23s"
+        error:
+          type: string
+          description: Error message (when failed)
+          example: "Invalid video codec in source file"
+        estimated_time_remaining:
+          type: string
+          description: Estimated time until completion
+          example: "2m 30s"
+
+    JobCancelResponse:
+      type: object
+      required:
+        - success
+        - message
+        - job_id
+        - status
+        - timestamp
+      properties:
+        success:
+          type: boolean
+          description: Whether the cancellation was successful
+          example: true
+        message:
+          type: string
+          description: Cancellation confirmation message
+          example: "Job cancelled successfully"
+        job_id:
+          type: string
+          description: The cancelled job identifier
+          example: "job_abc123def456"
+        status:
+          type: string
+          enum: [cancelled]
+          description: New job status
+          example: "cancelled"
+        timestamp:
+          type: string
+          format: date-time
+          description: Cancellation timestamp
+          example: "2024-01-15T10:30:00.000Z"
+
+    JobListResponse:
+      type: object
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobSummary"
+        pagination:
+          $ref: "#/components/schemas/PaginationInfo"
+
+    JobSummary:
+      type: object
+      required:
+        - job_id
+        - status
+        - created_at
+        - updated_at
+        - output_format
+        - width
+        - height
+        - elements_count
+      properties:
+        job_id:
+          type: string
+          example: "job_abc123def456"
+        status:
+          type: string
+          enum: [pending, processing, completed, failed, cancelled]
+          example: "completed"
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:00:00.000Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:05:23.000Z"
+        output_format:
+          type: string
+          enum: [mp4, mov, avi]
+          example: "mp4"
+        width:
+          type: integer
+          example: 1920
+        height:
+          type: integer
+          example: 1080
+        elements_count:
+          type: integer
+          example: 2
+        file_size:
+          type: string
+          description: Size of generated file (when completed)
+          example: "15.2 MB"
+        processing_time:
+          type: string
+          description: Total processing time (when completed)
+          example: "5m 23s"
+        result_url:
+          type: string
+          format: uri
+          description: Public URL to generated video (when completed)
+          example: "https://cdn.videogeneration.platform/videos/abc123/output.mp4"
+        progress:
+          type: string
+          pattern: '^\d+%$'
+          description: Processing progress (when in progress)
+          example: "78%"
+        current_step:
+          type: string
+          description: Current processing step (when in progress)
+          example: "Applying visual effects"
+        estimated_completion:
+          type: string
+          format: date-time
+          description: Estimated completion time (when in progress)
+          example: "2024-01-15T10:35:00.000Z"
+
+    JobDetailsResponse:
+      type: object
+      required:
+        - job_id
+        - status
+        - created_at
+        - updated_at
+        - configuration
+        - timeline
+      properties:
+        job_id:
+          type: string
+          example: "job_abc123def456"
+        status:
+          type: string
+          enum: [pending, processing, completed, failed, cancelled]
+          example: "completed"
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:00:00.000Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:05:23.000Z"
+        started_at:
+          type: string
+          format: date-time
+          description: When processing actually started
+          example: "2024-01-15T10:00:05.000Z"
+        completed_at:
+          type: string
+          format: date-time
+          description: When processing completed (if applicable)
+          example: "2024-01-15T10:05:23.000Z"
+        configuration:
+          $ref: "#/components/schemas/VideoCreateRequest"
+        result:
+          $ref: "#/components/schemas/JobResult"
+        metrics:
+          $ref: "#/components/schemas/JobMetrics"
+        timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobTimelineEvent"
+
+    JobResult:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Public URL to the generated video
+          example: "https://cdn.videogeneration.platform/videos/abc123/output.mp4"
+        file_size:
+          type: string
+          description: Size of the generated file
+          example: "15.2 MB"
+        duration:
+          type: string
+          description: Duration of the video
+          example: "00:02:45"
+        resolution:
+          type: string
+          description: Video resolution
+          example: "1920x1080"
+        bitrate:
+          type: string
+          description: Video bitrate
+          example: "5000 kbps"
+        codec:
+          type: string
+          description: Video codec used
+          example: "H.264"
+
+    JobMetrics:
+      type: object
+      properties:
+        total_processing_time:
+          type: string
+          description: Total time from start to finish
+          example: "5m 23s"
+        queue_time:
+          type: string
+          description: Time spent in queue
+          example: "5s"
+        download_time:
+          type: string
+          description: Time to download source files
+          example: "1m 12s"
+        processing_time:
+          type: string
+          description: Actual video processing time
+          example: "3m 45s"
+        upload_time:
+          type: string
+          description: Time to upload result
+          example: "21s"
+        cpu_usage_avg:
+          type: string
+          description: Average CPU usage during processing
+          example: "85%"
+        memory_usage_max:
+          type: string
+          description: Peak memory usage
+          example: "2.3 GB"
+
+    JobTimelineEvent:
+      type: object
+      required:
+        - timestamp
+        - event
+        - description
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:00:00.000Z"
+        event:
+          type: string
+          enum:
+            [
+              job_created,
+              processing_started,
+              files_downloaded,
+              processing_completed,
+              upload_completed,
+              job_failed,
+              job_cancelled,
+            ]
+          example: "job_created"
+        description:
+          type: string
+          example: "Job created and queued for processing"
+        details:
+          type: object
+          description: Additional event-specific details
+          additionalProperties: true
+
+    PaginationInfo:
+      type: object
+      required:
+        - page
+        - limit
+        - total
+        - totalPages
+        - hasNext
+        - hasPrev
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          description: Current page number
+          example: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Items per page
+          example: 20
+        total:
+          type: integer
+          minimum: 0
+          description: Total number of items
+          example: 45
+        totalPages:
+          type: integer
+          minimum: 0
+          description: Total number of pages
+          example: 3
+        hasNext:
+          type: boolean
+          description: Whether there are more pages
+          example: true
+        hasPrev:
+          type: boolean
+          description: Whether there are previous pages
+          example: false
+
+    ApiInfoResponse:
+      type: object
+      required:
+        - message
+        - version
+        - timestamp
+        - endpoints
+        - documentation
+      properties:
+        message:
+          type: string
+          example: "Dynamic Video Content Generation Platform API v1"
+        version:
+          type: string
+          example: "1.0.0"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00.000Z"
+        endpoints:
+          type: object
+          properties:
+            health:
+              type: string
+              example: "/api/v1/health"
+            video:
+              type: string
+              example: "/api/v1/video"
+            videocreate:
+              type: string
+              example: "/api/v1/videocreate"
+            videoresult:
+              type: string
+              example: "/api/v1/videoresult/:jobId"
+        documentation:
+          type: string
+          format: uri
+          example: "https://docs.videogeneration.platform"
+
+    BasicHealthResponse:
+      type: object
+      required:
+        - ok
+        - timestamp
+        - version
+        - uptime
+      properties:
+        ok:
+          type: boolean
+          description: Overall health status
+          example: true
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00.000Z"
+        version:
+          type: string
+          description: API version
+          example: "1.0.0"
+        uptime:
+          type: integer
+          description: Server uptime in seconds
+          example: 86400
+
+    DetailedHealthResponse:
+      allOf:
+        - $ref: "#/components/schemas/BasicHealthResponse"
+        - type: object
+          required:
+            - services
+          properties:
+            services:
+              type: object
+              required:
+                - database
+                - s3
+                - ffmpeg
+              properties:
+                database:
+                  $ref: "#/components/schemas/ServiceStatus"
+                s3:
+                  $ref: "#/components/schemas/ServiceStatus"
+                ffmpeg:
+                  $ref: "#/components/schemas/ServiceStatus"
+
+    ServiceStatus:
+      type: object
+      required:
+        - status
+        - lastCheck
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy, degraded]
+          description: Service health status
+          example: "healthy"
+        responseTime:
+          type: integer
+          description: Response time in milliseconds
+          example: 12
+        lastCheck:
+          type: string
+          format: date-time
+          description: Last health check timestamp
+          example: "2024-01-15T10:29:55.000Z"
+        error:
+          type: string
+          description: Error message if unhealthy
+          example: "Connection timeout"
+
+    ReadinessResponse:
+      type: object
+      required:
+        - ready
+        - timestamp
+      properties:
+        ready:
+          type: boolean
+          description: Whether service is ready to accept requests
+          example: true
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00.000Z"
+        checks:
+          type: object
+          description: Individual readiness checks
+          additionalProperties:
+            type: boolean
+
+    LivenessResponse:
+      type: object
+      required:
+        - alive
+        - timestamp
+      properties:
+        alive:
+          type: boolean
+          description: Whether service is alive
+          example: true
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00.000Z"
+
+    ApiError:
+      type: object
+      required:
+        - error
+        - message
+        - statusCode
+        - timestamp
+      properties:
+        error:
+          type: string
+          description: Error code identifier
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Request validation failed"
+        statusCode:
+          type: integer
+          description: HTTP status code
+          example: 400
+        timestamp:
+          type: string
+          format: date-time
+          description: Error timestamp
+          example: "2024-01-15T10:30:00.000Z"
+        correlationId:
+          type: string
+          description: Request correlation ID for tracking
+          example: "req_123abc"
+        details:
+          type: object
+          description: Additional error details
+          additionalProperties: true
+
+    ValidationErrorResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiError"
+        - type: object
+          properties:
+            details:
+              type: array
+              items:
+                $ref: "#/components/schemas/ValidationErrorDetail"
+
+    ValidationErrorDetail:
+      type: object
+      required:
+        - field
+        - message
+      properties:
+        field:
+          type: string
+          description: Field name that failed validation
+          example: "width"
+        message:
+          type: string
+          description: Validation error message
+          example: "Width must be between 1 and 7680 pixels"
+        value:
+          description: The value that failed validation
+          example: 8000
+
+tags:
+  - name: General
+    description: General API information and metadata
+  - name: Health
+    description: Health check and monitoring endpoints
+  - name: Video Processing
+    description: Core video creation and processing operations
+  - name: Video Management
+    description: Job management and tracking operations
+  - name: Real-time Updates
+    description: Live updates and streaming endpoints
+
+externalDocs:
+  description: Complete API Documentation
+  url: https://docs.videogeneration.platform

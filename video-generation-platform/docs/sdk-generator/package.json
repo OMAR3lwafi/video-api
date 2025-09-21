@@ -1,0 +1,47 @@
+{
+  "name": "@videogeneration/sdk-generator",
+  "version": "1.0.0",
+  "description": "TypeScript SDK generator for Video Generation Platform API",
+  "private": true,
+  "main": "generate-sdk.js",
+  "bin": {
+    "generate-video-sdk": "./generate-sdk.js"
+  },
+  "scripts": {
+    "generate": "node generate-sdk.js",
+    "generate:watch": "nodemon generate-sdk.js",
+    "clean": "rm -rf generated-sdk",
+    "build": "npm run clean && npm run generate",
+    "test": "jest",
+    "lint": "eslint *.js",
+    "lint:fix": "eslint *.js --fix"
+  },
+  "keywords": [
+    "video",
+    "api",
+    "sdk",
+    "generator",
+    "openapi",
+    "typescript"
+  ],
+  "author": "Video Generation Platform Team",
+  "license": "MIT",
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.54.0",
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.1",
+    "@types/js-yaml": "^4.0.9"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/videogeneration/platform-docs"
+  }
+}

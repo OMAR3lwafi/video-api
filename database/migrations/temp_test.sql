@@ -1,0 +1,1 @@
+SELECT 'Syntax validation test';

@@ -1,0 +1,549 @@
+version: "3.8"
+
+services:
+  # Backend API Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: video-generation-backend
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3000
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - FFMPEG_PATH=/usr/bin/ffmpeg
+      - FFPROBE_PATH=/usr/bin/ffprobe
+      - TEMP_DIR=/tmp/video-processing
+      - IMMEDIATE_RESPONSE_THRESHOLD=${IMMEDIATE_RESPONSE_THRESHOLD:-30000}
+      - MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS:-5}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:80}
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - JWT_SECRET=${JWT_SECRET}
+      - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS:-60000}
+      - RATE_LIMIT_MAX_REQUESTS=${RATE_LIMIT_MAX_REQUESTS:-100}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@database:5432/video_generation}
+    volumes:
+      - backend-temp:/tmp/video-processing
+      - backend-logs:/app/logs
+      - backend-uploads:/app/uploads
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "${BACKEND_CPU_LIMIT:-2.0}"
+          memory: ${BACKEND_MEMORY_LIMIT:-1G}
+        reservations:
+          cpus: "${BACKEND_CPU_RESERVATION:-0.5}"
+          memory: ${BACKEND_MEMORY_RESERVATION:-512M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service,environment"
+
+  # Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:3000/api/v1}
+        - VITE_SUPABASE_URL=${VITE_SUPABASE_URL}
+        - VITE_SUPABASE_ANON_KEY=${VITE_SUPABASE_ANON_KEY}
+        - VITE_AWS_S3_BUCKET=${VITE_AWS_S3_BUCKET}
+        - VITE_APP_VERSION=${BUILD_NUMBER:-latest}
+    container_name: video-generation-frontend
+    ports:
+      - "${FRONTEND_HTTP_PORT:-80}:80"
+      - "${FRONTEND_HTTPS_PORT:-443}:443"
+    environment:
+      - NGINX_WORKER_PROCESSES=${NGINX_WORKER_PROCESSES:-auto}
+      - NGINX_WORKER_CONNECTIONS=${NGINX_WORKER_CONNECTIONS:-1024}
+      - NGINX_KEEPALIVE_TIMEOUT=${NGINX_KEEPALIVE_TIMEOUT:-65}
+    volumes:
+      - frontend-cache:/var/cache/nginx
+      - frontend-logs:/var/log/nginx
+      - ./ssl:/etc/ssl/private:ro
+    depends_on:
+      - backend
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          cpus: "${FRONTEND_CPU_LIMIT:-1.0}"
+          memory: ${FRONTEND_MEMORY_LIMIT:-512M}
+        reservations:
+          cpus: "${FRONTEND_CPU_RESERVATION:-0.25}"
+          memory: ${FRONTEND_MEMORY_RESERVATION:-128M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service,environment"
+
+  # Orchestrator Service
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: video-generation-orchestrator
+    ports:
+      - "${ORCHESTRATOR_PORT:-9000}:9000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=9000
+      - BACKEND_URL=http://backend:3000
+      - REDIS_URL=redis://redis:6379
+      - MAX_CONCURRENT_JOBS=${ORCHESTRATOR_MAX_CONCURRENT_JOBS:-10}
+      - JOB_TIMEOUT=${ORCHESTRATOR_JOB_TIMEOUT:-1800000}
+      - HEALTH_CHECK_INTERVAL=${ORCHESTRATOR_HEALTH_CHECK_INTERVAL:-30000}
+      - QUEUE_RETRY_ATTEMPTS=${QUEUE_RETRY_ATTEMPTS:-3}
+      - QUEUE_RETRY_DELAY=${QUEUE_RETRY_DELAY:-5000}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - METRICS_ENABLED=${METRICS_ENABLED:-true}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@database:5432/video_generation}
+    volumes:
+      - orchestrator-logs:/app/logs
+      - orchestrator-temp:/app/temp
+      - orchestrator-queue:/app/queue-data
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "${ORCHESTRATOR_CPU_LIMIT:-2.0}"
+          memory: ${ORCHESTRATOR_MEMORY_LIMIT:-1G}
+        reservations:
+          cpus: "${ORCHESTRATOR_CPU_RESERVATION:-0.5}"
+          memory: ${ORCHESTRATOR_MEMORY_RESERVATION:-256M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service,environment"
+
+  # Redis for job queuing and caching
+  redis:
+    image: redis:7-alpine
+    container_name: video-generation-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    environment:
+      - REDIS_APPENDONLY=yes
+      - REDIS_APPENDFSYNC=everysec
+      - REDIS_MAXMEMORY=${REDIS_MAXMEMORY:-1gb}
+      - REDIS_MAXMEMORY_POLICY=allkeys-lru
+    volumes:
+      - redis-data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "${REDIS_CPU_LIMIT:-1.0}"
+          memory: ${REDIS_MEMORY_LIMIT:-1.5G}
+        reservations:
+          cpus: "${REDIS_CPU_RESERVATION:-0.25}"
+          memory: ${REDIS_MEMORY_RESERVATION:-512M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # PostgreSQL Database
+  database:
+    image: postgres:15-alpine
+    container_name: video-generation-database
+    ports:
+      - "${DATABASE_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_DB=${DB_NAME:-video_generation}
+      - POSTGRES_USER=${DB_USER:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-postgres}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      - POSTGRES_MAX_CONNECTIONS=${DB_MAX_CONNECTIONS:-100}
+      - POSTGRES_SHARED_BUFFERS=${DB_SHARED_BUFFERS:-128MB}
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=${DB_EFFECTIVE_CACHE_SIZE:-512MB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-backups:/backups
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+      - ./database/migrations:/migrations:ro
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-video_generation}",
+        ]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "${DB_CPU_LIMIT:-2.0}"
+          memory: ${DB_MEMORY_LIMIT:-1G}
+        reservations:
+          cpus: "${DB_CPU_RESERVATION:-0.5}"
+          memory: ${DB_MEMORY_RESERVATION:-256M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: video-generation-prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    environment:
+      - TZ=UTC
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}"
+      - "--storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-5GB}"
+      - "--web.enable-lifecycle"
+      - "--log.level=info"
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:9090/-/healthy",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "${PROMETHEUS_CPU_LIMIT:-1.0}"
+          memory: ${PROMETHEUS_MEMORY_LIMIT:-1G}
+        reservations:
+          cpus: "${PROMETHEUS_CPU_RESERVATION:-0.25}"
+          memory: ${PROMETHEUS_MEMORY_RESERVATION:-256M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: video-generation-grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-clock-panel
+      - GF_FEATURE_TOGGLES_ENABLE=ngalert
+      - GF_LOG_LEVEL=info
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3001}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/alerting:/etc/grafana/provisioning/alerting:ro
+    depends_on:
+      - prometheus
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "${GRAFANA_CPU_LIMIT:-0.5}"
+          memory: ${GRAFANA_MEMORY_LIMIT:-256M}
+        reservations:
+          cpus: "${GRAFANA_CPU_RESERVATION:-0.1}"
+          memory: ${GRAFANA_MEMORY_RESERVATION:-64M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Node Exporter for system metrics
+  node-exporter:
+    image: prom/node-exporter:v1.6.0
+    container_name: video-generation-node-exporter
+    ports:
+      - "${NODE_EXPORTER_PORT:-9100}:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.rootfs=/rootfs"
+      - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($|/)"
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+        reservations:
+          cpus: "0.1"
+          memory: 32M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # cAdvisor for container metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.0
+    container_name: video-generation-cadvisor
+    ports:
+      - "${CADVISOR_PORT:-8080}:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # MinIO for S3-compatible storage (development/testing)
+  minio:
+    image: minio/minio:RELEASE.2023-07-07T07-13-57Z
+    container_name: video-generation-minio
+    ports:
+      - "${MINIO_API_PORT:-9001}:9000"
+      - "${MINIO_CONSOLE_PORT:-9002}:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_BROWSER_REDIRECT_URL=${MINIO_BROWSER_REDIRECT_URL:-http://localhost:9002}
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    profiles:
+      - minio
+    deploy:
+      resources:
+        limits:
+          cpus: "${MINIO_CPU_LIMIT:-1.0}"
+          memory: ${MINIO_MEMORY_LIMIT:-512M}
+        reservations:
+          cpus: "${MINIO_CPU_RESERVATION:-0.25}"
+          memory: ${MINIO_MEMORY_RESERVATION:-128M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Named volumes for persistent data
+volumes:
+  redis-data:
+    driver: local
+    name: video-generation-redis-data
+  postgres-data:
+    driver: local
+    name: video-generation-postgres-data
+  postgres-backups:
+    driver: local
+    name: video-generation-postgres-backups
+  prometheus-data:
+    driver: local
+    name: video-generation-prometheus-data
+  grafana-data:
+    driver: local
+    name: video-generation-grafana-data
+  minio-data:
+    driver: local
+    name: video-generation-minio-data
+  backend-temp:
+    driver: local
+    name: video-generation-backend-temp
+  backend-logs:
+    driver: local
+    name: video-generation-backend-logs
+  backend-uploads:
+    driver: local
+    name: video-generation-backend-uploads
+  orchestrator-logs:
+    driver: local
+    name: video-generation-orchestrator-logs
+  orchestrator-temp:
+    driver: local
+    name: video-generation-orchestrator-temp
+  orchestrator-queue:
+    driver: local
+    name: video-generation-orchestrator-queue
+  frontend-cache:
+    driver: local
+    name: video-generation-frontend-cache
+  frontend-logs:
+    driver: local
+    name: video-generation-frontend-logs
+
+# Networks configuration
+networks:
+  video-generation-network:
+    driver: bridge
+    name: video-generation-network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+    labels:
+      - "environment=${NODE_ENV:-production}"
+      - "project=video-generation-platform"
+      - "version=${BUILD_NUMBER:-latest}"
+
+# Global configuration extensions
+x-common-variables: &common-variables
+  TZ: ${TZ:-UTC}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  NODE_ENV: ${NODE_ENV:-production}
+
+x-restart-policy: &restart-policy
+  restart: unless-stopped
+
+x-logging-config: &logging-config
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 30s
+
+x-resource-defaults: &resource-defaults
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+      reservations:
+        cpus: "0.25"
+        memory: 128M

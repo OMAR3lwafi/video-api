@@ -1,0 +1,521 @@
+version: "3.8"
+
+services:
+  # Backend API Service - Development Mode
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+      args:
+        - NODE_ENV=development
+    container_name: video-generation-backend-dev
+    ports:
+      - "3000:3000"
+      - "9229:9229" # Debug port
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - SUPABASE_URL=${SUPABASE_URL:-http://supabase:54321}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - FFMPEG_PATH=/usr/bin/ffmpeg
+      - FFPROBE_PATH=/usr/bin/ffprobe
+      - TEMP_DIR=/tmp/video-processing
+      - IMMEDIATE_RESPONSE_THRESHOLD=30000
+      - MAX_CONCURRENT_JOBS=3
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://frontend:80
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=debug
+      - ENABLE_SWAGGER=true
+      - JWT_SECRET=${JWT_SECRET:-dev-jwt-secret-key}
+      - RATE_LIMIT_WINDOW_MS=60000
+      - RATE_LIMIT_MAX_REQUESTS=100
+    volumes:
+      - ./backend/src:/app/src:ro
+      - ./backend/config:/app/config:ro
+      - ./backend/tests:/app/tests:ro
+      - backend-temp:/tmp/video-processing
+      - backend-logs:/app/logs
+      - backend-uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    develop:
+      watch:
+        - action: sync
+          path: ./backend/src
+          target: /app/src
+          ignore:
+            - node_modules/
+        - action: rebuild
+          path: ./backend/package.json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # Frontend Service - Development Mode
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+      args:
+        - VITE_API_BASE_URL=http://localhost:3000/api/v1
+        - VITE_SUPABASE_URL=${SUPABASE_URL:-http://localhost:54321}
+        - VITE_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+        - VITE_AWS_S3_BUCKET=${AWS_S3_BUCKET}
+        - VITE_APP_VERSION=dev-${BUILD_NUMBER:-local}
+    container_name: video-generation-frontend-dev
+    ports:
+      - "5173:5173" # Vite dev server
+      - "24678:24678" # Vite HMR
+    environment:
+      - NODE_ENV=development
+      - VITE_API_BASE_URL=http://localhost:3000/api/v1
+      - VITE_SUPABASE_URL=${SUPABASE_URL:-http://localhost:54321}
+      - VITE_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - VITE_AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - VITE_ENABLE_DEVTOOLS=true
+      - VITE_LOG_LEVEL=debug
+      - VITE_APP_VERSION=dev-${BUILD_NUMBER:-local}
+    volumes:
+      - ./frontend/src:/app/src:ro
+      - ./frontend/public:/app/public:ro
+      - ./frontend/index.html:/app/index.html:ro
+      - ./frontend/vite.config.ts:/app/vite.config.ts:ro
+      - ./frontend/tailwind.config.js:/app/tailwind.config.js:ro
+      - ./frontend/postcss.config.js:/app/postcss.config.js:ro
+      - frontend-node-modules:/app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    develop:
+      watch:
+        - action: sync
+          path: ./frontend/src
+          target: /app/src
+          ignore:
+            - node_modules/
+        - action: sync
+          path: ./frontend/public
+          target: /app/public
+        - action: rebuild
+          path: ./frontend/package.json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5173"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # Orchestrator Service - Development Mode
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+      target: development
+      args:
+        - NODE_ENV=development
+    container_name: video-generation-orchestrator-dev
+    ports:
+      - "9000:9000"
+      - "9229:9229" # Debug port (different from backend)
+    environment:
+      - NODE_ENV=development
+      - PORT=9000
+      - BACKEND_URL=http://backend:3000
+      - REDIS_URL=redis://redis:6379
+      - MAX_CONCURRENT_JOBS=5
+      - JOB_TIMEOUT=1800000
+      - HEALTH_CHECK_INTERVAL=30000
+      - QUEUE_RETRY_ATTEMPTS=3
+      - QUEUE_RETRY_DELAY=5000
+      - LOG_LEVEL=debug
+      - METRICS_ENABLED=true
+    volumes:
+      - ./orchestrator/src:/app/src:ro
+      - ./orchestrator/config:/app/config:ro
+      - orchestrator-logs:/app/logs
+      - orchestrator-temp:/app/temp
+      - orchestrator-queue:/app/queue-data
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    develop:
+      watch:
+        - action: sync
+          path: ./orchestrator/src
+          target: /app/src
+          ignore:
+            - node_modules/
+        - action: rebuild
+          path: ./orchestrator/package.json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 768M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  # Redis for job queuing and caching
+  redis:
+    image: redis:7-alpine
+    container_name: video-generation-redis-dev
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_APPENDONLY=yes
+      - REDIS_APPENDFSYNC=everysec
+    volumes:
+      - redis-data:/data
+      - ./redis/redis.dev.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  # PostgreSQL Database (Development)
+  database:
+    image: postgres:15-alpine
+    container_name: video-generation-db-dev
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=${DB_NAME:-video_generation}
+      - POSTGRES_USER=${DB_USER:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-postgres}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+      - ./database/migrations:/migrations:ro
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-video_generation}",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  # Supabase Local (Alternative to direct PostgreSQL)
+  supabase:
+    image: supabase/supabase-local:latest
+    container_name: video-generation-supabase-dev
+    ports:
+      - "54321:54321" # API Gateway
+      - "54322:54322" # Database
+      - "54323:54323" # Studio
+      - "54324:54324" # Inbucket (Email testing)
+      - "54325:54325" # Storage
+      - "54326:54326" # Auth
+    environment:
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-your-super-secret-and-long-postgres-password}
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-token-with-at-least-32-characters-long}
+      - ANON_KEY=${SUPABASE_ANON_KEY}
+      - SERVICE_ROLE_KEY=${SUPABASE_SERVICE_KEY}
+      - STUDIO_DEFAULT_ORGANIZATION=Default Organization
+      - STUDIO_DEFAULT_PROJECT=Default Project
+      - SUPABASE_PUBLIC_URL=http://localhost:54321
+    volumes:
+      - supabase-data:/var/lib/postgresql/data
+      - ./database/supabase:/var/lib/supabase:ro
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:54321/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    profiles:
+      - supabase
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: video-generation-prometheus-dev
+    ports:
+      - "9090:9090"
+    environment:
+      - TZ=UTC
+    volumes:
+      - ./monitoring/prometheus/prometheus.dev.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--storage.tsdb.retention.time=7d"
+      - "--storage.tsdb.retention.size=1GB"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+      - "--log.level=info"
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:9090/-/healthy",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: video-generation-grafana-dev
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-clock-panel
+      - GF_FEATURE_TOGGLES_ENABLE=ngalert
+      - GF_LOG_LEVEL=info
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/alerting:/etc/grafana/provisioning/alerting:ro
+    depends_on:
+      - prometheus
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  # Mailhog for email testing
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: video-generation-mailhog-dev
+    ports:
+      - "8025:8025" # Web interface
+      - "1025:1025" # SMTP server
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    profiles:
+      - testing
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+        reservations:
+          cpus: "0.1"
+          memory: 32M
+
+  # MinIO for S3-compatible storage (development)
+  minio:
+    image: minio/minio:RELEASE.2023-07-07T07-13-57Z
+    container_name: video-generation-minio-dev
+    ports:
+      - "9001:9000" # API
+      - "9002:9001" # Console
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_BROWSER_REDIRECT_URL=http://localhost:9002
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - video-generation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - minio
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+# Named volumes for persistent data
+volumes:
+  redis-data:
+    driver: local
+  postgres-data:
+    driver: local
+  supabase-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  minio-data:
+    driver: local
+  backend-temp:
+    driver: local
+  backend-logs:
+    driver: local
+  backend-uploads:
+    driver: local
+  orchestrator-logs:
+    driver: local
+  orchestrator-temp:
+    driver: local
+  orchestrator-queue:
+    driver: local
+  frontend-node-modules:
+    driver: local
+
+# Networks configuration
+networks:
+  video-generation-network:
+    driver: bridge
+    name: video-generation-dev
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.21.0.0/16
+          gateway: 172.21.0.1
+    labels:
+      - "environment=development"
+      - "project=video-generation-platform"
+
+# Development-specific configurations
+x-common-variables: &common-variables
+  TZ: UTC
+  LOG_LEVEL: debug
+  NODE_ENV: development
+
+# Resource limits template
+x-resource-limits: &default-resources
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+      reservations:
+        cpus: "0.25"
+        memory: 128M
+
+# Health check template
+x-health-check: &default-healthcheck
+  healthcheck:
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 30s

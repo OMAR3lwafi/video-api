@@ -1,0 +1,264 @@
+version: '3.8'
+
+services:
+  # Main Orchestrator Service
+  orchestrator-master:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: orchestrator-master
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+      - PORT=9000
+      - ORCHESTRATOR_MODE=master
+      - MAX_CONCURRENT_JOBS=50
+      - LOAD_BALANCING_STRATEGY=ai_driven
+      - HEALTH_CHECK_INTERVAL=30000
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://orchestrator:orchestrator123@postgres:5432/orchestrator
+      - S3_BUCKET=video-orchestrator-results
+      - AWS_REGION=us-east-1
+      - ENABLE_ANALYTICS=true
+      - CIRCUIT_BREAKER_ENABLED=true
+      - AUTO_SCALING_ENABLED=true
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - orchestrator_temp:/app/temp
+    depends_on:
+      - redis
+      - postgres
+      - prometheus
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '2.0'
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - orchestrator-network
+
+  # Worker Orchestrator (for distributed processing)
+  orchestrator-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+      - PORT=9001
+      - ORCHESTRATOR_MODE=worker
+      - MAX_CONCURRENT_JOBS=20
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://orchestrator:orchestrator123@postgres:5432/orchestrator
+      - MASTER_ORCHESTRATOR_URL=http://orchestrator-master:9000
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - orchestrator_temp:/app/temp
+    depends_on:
+      - orchestrator-master
+      - redis
+      - postgres
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 8G
+        reservations:
+          cpus: '1.0'
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - orchestrator-network
+
+  # Redis for caching and job queuing
+  redis:
+    image: redis:7-alpine
+    container_name: orchestrator-redis
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - orchestrator-network
+
+  # PostgreSQL for job tracking and analytics
+  postgres:
+    image: postgres:15-alpine
+    container_name: orchestrator-postgres
+    environment:
+      - POSTGRES_DB=orchestrator
+      - POSTGRES_USER=orchestrator
+      - POSTGRES_PASSWORD=orchestrator123
+      - POSTGRES_INITDB_ARGS="--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator -d orchestrator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - orchestrator-network
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: orchestrator-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - orchestrator-network
+
+  # Grafana for monitoring dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: orchestrator-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=orchestrator123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - orchestrator-network
+
+  # NGINX Load Balancer (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: orchestrator-nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - orchestrator-master
+    restart: unless-stopped
+    networks:
+      - orchestrator-network
+
+  # MinIO for local S3-compatible storage (development)
+  minio:
+    image: minio/minio:latest
+    container_name: orchestrator-minio
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9009:9000"  # API
+      - "9001:9001"  # Console
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - orchestrator-network
+
+  # Jaeger for distributed tracing (optional)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: orchestrator-jaeger
+    environment:
+      - COLLECTOR_ZIPKIN_HTTP_PORT=9411
+    ports:
+      - "16686:16686"  # UI
+      - "14268:14268"  # HTTP collector
+      - "14250:14250"  # gRPC collector
+      - "9411:9411"    # Zipkin collector
+    restart: unless-stopped
+    networks:
+      - orchestrator-network
+
+  # Vector for log aggregation (optional)
+  vector:
+    image: timberio/vector:latest
+    container_name: orchestrator-vector
+    volumes:
+      - ./logging/vector.toml:/etc/vector/vector.toml
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - vector_data:/var/lib/vector
+    ports:
+      - "8686:8686"
+    restart: unless-stopped
+    networks:
+      - orchestrator-network
+
+volumes:
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  minio_data:
+    driver: local
+  vector_data:
+    driver: local
+  orchestrator_temp:
+    driver: local
+
+networks:
+  orchestrator-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

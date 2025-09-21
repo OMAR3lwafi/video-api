@@ -1,0 +1,683 @@
+name: Comprehensive Test Suite
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run nightly tests at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Test type to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - unit
+          - integration
+          - e2e
+          - performance
+          - load
+
+env:
+  NODE_VERSION: '18'
+  POSTGRES_PASSWORD: postgres
+  POSTGRES_DB: video_platform_test
+  REDIS_URL: redis://localhost:6379/1
+
+jobs:
+  # Job 1: Unit Tests (Backend & Frontend)
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'unit'
+
+    strategy:
+      matrix:
+        component: [backend, frontend]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: '${{ matrix.component }}/package-lock.json'
+
+      - name: Install dependencies
+        run: |
+          cd ${{ matrix.component }}
+          npm ci
+
+      - name: Run linting
+        run: |
+          cd ${{ matrix.component }}
+          npm run lint
+
+      - name: Run type checking
+        run: |
+          cd ${{ matrix.component }}
+          npm run type-check || echo "Type check not available"
+
+      - name: Run unit tests with coverage
+        run: |
+          cd ${{ matrix.component }}
+          if [ "${{ matrix.component }}" = "backend" ]; then
+            npm run test:unit -- --coverage --ci --watchAll=false --maxWorkers=2
+          else
+            npm run test:unit -- --run --coverage --reporter=junit --outputFile=../test-results/junit/frontend-unit-results.xml
+          fi
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ${{ matrix.component }}/coverage/lcov.info
+          flags: ${{ matrix.component }}-unit
+          name: ${{ matrix.component }}-unit-coverage
+          fail_ci_if_error: false
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: ${{ matrix.component }}-unit-test-results
+          path: |
+            ${{ matrix.component }}/coverage/
+            ${{ matrix.component }}/test-results/
+          retention-days: 30
+
+      - name: Comment PR with coverage
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            try {
+              const coveragePath = path.join('${{ matrix.component }}', 'coverage', 'coverage-summary.json');
+              if (fs.existsSync(coveragePath)) {
+                const coverage = JSON.parse(fs.readFileSync(coveragePath, 'utf8'));
+                const total = coverage.total;
+
+                const comment = `## ${{ matrix.component }} Coverage Report 📊
+
+                | Metric | Percentage | Status |
+                |--------|------------|---------|
+                | Lines | ${total.lines.pct}% | ${total.lines.pct >= 80 ? '✅' : '❌'} |
+                | Functions | ${total.functions.pct}% | ${total.functions.pct >= 80 ? '✅' : '❌'} |
+                | Branches | ${total.branches.pct}% | ${total.branches.pct >= 80 ? '✅' : '❌'} |
+                | Statements | ${total.statements.pct}% | ${total.statements.pct >= 80 ? '✅' : '❌'} |
+
+                Target: 80% coverage for all metrics`;
+
+                github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: comment
+                });
+              }
+            } catch (error) {
+              console.log('Could not post coverage comment:', error.message);
+            }
+
+  # Job 2: Integration Tests
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'integration'
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'backend/package-lock.json'
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          npm ci
+
+      - name: Setup test environment
+        run: |
+          cd backend
+          cp .env.example .env.test
+          echo "DATABASE_URL=postgresql://postgres:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}" >> .env.test
+          echo "REDIS_URL=${{ env.REDIS_URL }}" >> .env.test
+
+      - name: Run database migrations
+        run: |
+          cd backend
+          npm run migrate:test || echo "Migration not available"
+
+      - name: Run integration tests
+        run: |
+          cd backend
+          npm run test:integration -- --coverage --ci --watchAll=false --maxWorkers=1 --testTimeout=30000
+
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: integration-test-results
+          path: |
+            backend/coverage/
+            backend/test-results/
+          retention-days: 30
+
+  # Job 3: End-to-End Tests
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'e2e'
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          # Install backend dependencies
+          cd backend && npm ci && cd ..
+          # Install frontend dependencies
+          cd frontend && npm ci && cd ..
+
+      - name: Install Playwright browsers
+        run: |
+          npx playwright install --with-deps
+
+      - name: Setup test environment
+        run: |
+          cd backend
+          cp .env.example .env.test
+          echo "DATABASE_URL=postgresql://postgres:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}" >> .env.test
+          echo "REDIS_URL=${{ env.REDIS_URL }}" >> .env.test
+
+      - name: Build applications
+        run: |
+          # Build backend
+          cd backend && npm run build && cd ..
+          # Build frontend
+          cd frontend && npm run build && cd ..
+
+      - name: Start services for E2E tests
+        run: |
+          # Start backend in background
+          cd backend && npm start &
+          # Start frontend in background
+          cd frontend && npm run preview &
+          # Wait for services to start
+          sleep 10
+
+      - name: Run E2E tests
+        run: |
+          npx playwright test --project=chromium --workers=1 --reporter=junit
+
+      - name: Upload E2E test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: e2e-test-results
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 30
+
+      - name: Upload E2E test report
+        if: always()
+        run: |
+          if [ -d "playwright-report" ]; then
+            echo "E2E test report available at: playwright-report/index.html"
+          fi
+
+  # Job 4: Performance Tests
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'performance'
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'backend/package-lock.json'
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          npm ci
+
+      - name: Setup test environment
+        run: |
+          cd backend
+          cp .env.example .env.test
+          echo "DATABASE_URL=postgresql://postgres:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}" >> .env.test
+          echo "REDIS_URL=${{ env.REDIS_URL }}" >> .env.test
+
+      - name: Run performance tests
+        run: |
+          cd backend
+          npm run test:performance -- --ci --watchAll=false --testTimeout=60000
+
+      - name: Upload performance test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: performance-test-results
+          path: backend/test-results/
+          retention-days: 30
+
+  # Job 5: Load Tests (only on schedule or manual trigger)
+  load-tests:
+    name: Load Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'load'))
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'backend/package-lock.json'
+
+      - name: Install dependencies and Artillery
+        run: |
+          cd backend
+          npm ci
+          npm install -g artillery@latest
+
+      - name: Setup test environment
+        run: |
+          cd backend
+          cp .env.example .env.test
+          echo "DATABASE_URL=postgresql://postgres:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}" >> .env.test
+          echo "REDIS_URL=${{ env.REDIS_URL }}" >> .env.test
+
+      - name: Build and start backend
+        run: |
+          cd backend
+          npm run build
+          npm start &
+          sleep 15
+
+      - name: Run load tests
+        run: |
+          cd backend
+          mkdir -p test-results/load-test
+          artillery run tests/performance/load-test.yml --output test-results/load-test/artillery-results.json
+
+      - name: Generate load test report
+        if: always()
+        run: |
+          cd backend
+          if [ -f "test-results/load-test/artillery-results.json" ]; then
+            artillery report test-results/load-test/artillery-results.json --output test-results/load-test/artillery-report.html
+          fi
+
+      - name: Upload load test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: load-test-results
+          path: backend/test-results/load-test/
+          retention-days: 30
+
+  # Job 6: Security Tests
+  security-tests:
+    name: Security Tests
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_type == 'all'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run npm audit
+        run: |
+          cd backend && npm audit --audit-level=moderate || true
+          cd frontend && npm audit --audit-level=moderate || true
+
+  # Job 7: Code Quality
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_type == 'all'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          cd backend && npm ci && cd ..
+          cd frontend && npm ci && cd ..
+
+      - name: Run ESLint
+        run: |
+          cd backend && npm run lint -- --format=json --output-file=eslint-report.json || true
+          cd frontend && npm run lint -- --format=json --output-file=eslint-report.json || true
+
+      - name: Run Prettier check
+        run: |
+          cd backend && npm run format -- --check || true
+          cd frontend && npm run format -- --check || true
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        if: env.SONAR_TOKEN != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # Job 8: Test Summary and Notifications
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, e2e-tests, performance-tests, security-tests, code-quality]
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Generate test summary
+        run: |
+          echo "# 🧪 Test Suite Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Type | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          # Check unit tests
+          if [ "${{ needs.unit-tests.result }}" == "success" ]; then
+            echo "| Unit Tests | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Unit Tests | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check integration tests
+          if [ "${{ needs.integration-tests.result }}" == "success" ]; then
+            echo "| Integration Tests | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Integration Tests | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check E2E tests
+          if [ "${{ needs.e2e-tests.result }}" == "success" ]; then
+            echo "| E2E Tests | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| E2E Tests | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check performance tests
+          if [ "${{ needs.performance-tests.result }}" == "success" ]; then
+            echo "| Performance Tests | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Performance Tests | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Coverage Reports" >> $GITHUB_STEP_SUMMARY
+          echo "Coverage reports are available in the test artifacts." >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🔗 Useful Links" >> $GITHUB_STEP_SUMMARY
+          echo "- [Backend Coverage Report](./backend-unit-test-results/coverage/html/index.html)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Frontend Coverage Report](./frontend-unit-test-results/coverage/html/index.html)" >> $GITHUB_STEP_SUMMARY
+          echo "- [E2E Test Report](./e2e-test-results/playwright-report/index.html)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on Slack (on failure)
+        if: failure() && github.ref == 'refs/heads/main'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          channel: '#dev-alerts'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+
+      - name: Create Issue on Test Failure
+        if: failure() && github.ref == 'refs/heads/main'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const title = `🚨 Test Suite Failure - ${new Date().toISOString().split('T')[0]}`;
+            const body = `## Test Suite Failure Report
+
+            **Branch:** ${context.ref}
+            **Commit:** ${context.sha}
+            **Workflow:** ${context.workflow}
+            **Run ID:** ${context.runId}
+
+            ### Failed Jobs:
+            ${JSON.stringify(context.payload, null, 2)}
+
+            Please investigate and fix the failing tests.
+
+            **Action Required:**
+            - [ ] Review failed test logs
+            - [ ] Fix failing tests
+            - [ ] Verify fix with new commit
+            - [ ] Close this issue once resolved
+
+            [View Workflow Run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['bug', 'testing', 'high-priority']
+            });
+
+  # Job 9: Deployment (only on main branch success)
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, e2e-tests, performance-tests, security-tests, code-quality]
+    if: success() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    environment:
+      name: staging
+      url: https://staging.video-platform.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to staging
+        run: |
+          echo "🚀 Deploying to staging environment..."
+          # Add your deployment logic here
+          # This could include:
+          # - Building Docker images
+          # - Pushing to container registry
+          # - Updating Kubernetes manifests
+          # - Running deployment scripts
+
+      - name: Run smoke tests
+        run: |
+          echo "🧪 Running smoke tests on staging..."
+          # Add smoke tests to verify deployment
+          sleep 30 # Wait for deployment
+          curl -f https://staging.video-platform.com/api/health || exit 1
+
+      - name: Notify deployment success
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          fields: repo,message,commit,author
+          custom_payload: |
+            {
+              text: "✅ Successfully deployed to staging!",
+              attachments: [{
+                color: "good",
+                fields: [{
+                  title: "Repository",
+                  value: "${{ github.repository }}",
+                  short: true
+                }, {
+                  title: "Branch",
+                  value: "${{ github.ref_name }}",
+                  short: true
+                }, {
+                  title: "Commit",
+                  value: "${{ github.sha }}".substring(0, 7),
+                  short: true
+                }, {
+                  title: "Environment",
+                  value: "staging",
+                  short: true
+                }]
+              }]
+            }

@@ -1,0 +1,182 @@
+{
+  "name": "@videogeneration/api-docs",
+  "version": "1.0.0",
+  "description": "Complete API documentation system for Video Generation Platform",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "build": "node scripts/generate-docs.js",
+    "build:no-deploy": "node scripts/generate-docs.js --no-deploy",
+    "build:github": "node scripts/generate-docs.js --github-only",
+    "build:s3": "node scripts/generate-docs.js --s3-only",
+    "build:netlify": "node scripts/generate-docs.js --netlify-only",
+    "build:no-validation": "node scripts/generate-docs.js --no-validation",
+    "dev": "npm run build:no-deploy && npm run serve",
+    "serve": "http-server generated-docs -p 8080 -c-1 -o",
+    "serve:swagger": "http-server generated-docs/swagger-ui -p 8081 -c-1 -o",
+    "generate-sdk": "cd sdk-generator && npm run generate",
+    "validate-spec": "npx @apidevtools/swagger-parser validate openapi/video-api.yaml",
+    "lint-spec": "npx spectral lint openapi/video-api.yaml",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "clean": "rm -rf generated-docs deployment",
+    "clean:cache": "rm -rf node_modules/.cache",
+    "preview": "npm run build:no-deploy && npm run serve",
+    "check-links": "markdown-link-check examples/*.md",
+    "format": "prettier --write **/*.{js,json,md,yaml}",
+    "lint": "eslint scripts/*.js",
+    "lint:fix": "eslint scripts/*.js --fix",
+    "watch": "nodemon --watch openapi --watch swagger-ui --watch examples --exec \"npm run build:no-deploy\"",
+    "postman:validate": "newman run generated-docs/collections/video-api.postman_collection.json --environment postman-environment.json",
+    "update-deps": "npm update && cd sdk-generator && npm update",
+    "security-audit": "npm audit && cd sdk-generator && npm audit",
+    "docker:build": "docker build -t video-api-docs .",
+    "docker:run": "docker run -p 8080:80 video-api-docs",
+    "prepare": "husky install",
+    "pre-commit": "lint-staged"
+  },
+  "keywords": [
+    "api",
+    "documentation",
+    "openapi",
+    "swagger",
+    "sdk",
+    "video",
+    "generation",
+    "platform"
+  ],
+  "author": "Video Generation Platform Team",
+  "license": "MIT",
+  "dependencies": {
+    "@apidevtools/swagger-parser": "^10.1.0",
+    "@openapitools/openapi-generator-cli": "^2.7.0",
+    "ajv": "^8.12.0",
+    "ajv-formats": "^2.1.1",
+    "axios": "^1.6.0",
+    "js-yaml": "^4.1.0",
+    "markdown-link-check": "^3.11.2",
+    "newman": "^6.0.0",
+    "openapi-to-postman": "^4.0.0",
+    "semver": "^7.5.4",
+    "widdershins": "^4.0.1"
+  },
+  "devDependencies": {
+    "@spectral/cli": "^6.11.0",
+    "@spectral/rulesets": "^1.15.1",
+    "@types/jest": "^29.5.8",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.10.0",
+    "@types/semver": "^7.5.6",
+    "eslint": "^8.54.0",
+    "eslint-config-prettier": "^9.0.0",
+    "eslint-plugin-node": "^11.1.0",
+    "http-server": "^14.1.1",
+    "husky": "^8.0.3",
+    "jest": "^29.7.0",
+    "lint-staged": "^15.1.0",
+    "nodemon": "^3.0.1",
+    "prettier": "^3.1.0",
+    "ts-jest": "^29.4.4",
+    "typescript": "^5.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/videogeneration/platform-docs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/videogeneration/platform-docs/issues"
+  },
+  "homepage": "https://docs.videogeneration.platform",
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/tests/**/*.test.js",
+      "**/*.test.js"
+    ],
+    "collectCoverageFrom": [
+      "scripts/**/*.js",
+      "!scripts/node_modules/**"
+    ],
+    "coverageDirectory": "coverage",
+    "coverageReporters": [
+      "text",
+      "lcov",
+      "html"
+    ]
+  },
+  "lint-staged": {
+    "*.{js,json,md,yaml}": [
+      "prettier --write"
+    ],
+    "*.js": [
+      "eslint --fix"
+    ],
+    "*.yaml": [
+      "spectral lint"
+    ],
+    "*.md": [
+      "markdown-link-check"
+    ]
+  },
+  "prettier": {
+    "semi": true,
+    "trailingComma": "es5",
+    "singleQuote": true,
+    "printWidth": 80,
+    "tabWidth": 2,
+    "useTabs": false
+  },
+  "eslintConfig": {
+    "env": {
+      "node": true,
+      "es2022": true,
+      "jest": true
+    },
+    "extends": [
+      "eslint:recommended",
+      "plugin:node/recommended",
+      "prettier"
+    ],
+    "parserOptions": {
+      "ecmaVersion": "latest",
+      "sourceType": "module"
+    },
+    "rules": {
+      "no-console": "off",
+      "no-process-exit": "off",
+      "node/no-unpublished-require": "off"
+    }
+  },
+  "spectral": {
+    "extends": [
+      "@spectral/rulesets/src/oas/index.ts"
+    ],
+    "rules": {
+      "operation-operationId": "error",
+      "operation-description": "warn",
+      "operation-tags": "error",
+      "openapi-tags": "warn",
+      "info-description": "error",
+      "info-contact": "warn",
+      "info-license": "warn"
+    }
+  },
+  "nodemonConfig": {
+    "ignore": [
+      "generated-docs/**",
+      "deployment/**",
+      "node_modules/**",
+      "coverage/**"
+    ],
+    "ext": "js,yaml,md,json"
+  },
+  "volta": {
+    "node": "20.10.0",
+    "npm": "10.2.3"
+  }
+}
