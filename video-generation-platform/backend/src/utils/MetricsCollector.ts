@@ -117,23 +117,23 @@ export class MetricsCollector extends EventEmitter {
   private prometheusMetrics: Map<string, any>;
   private exportTimer: NodeJS.Timeout | null = null;
   private isEnabled: boolean;
-  private registry: client.Registry;
+  private registry: client.Registry | null = null;
 
   // Prometheus metric instances
-  private httpRequestsTotal: client.Counter;
-  private httpRequestDuration: client.Histogram;
-  private dbQueryDuration: client.Histogram;
-  private dbQueryTotal: client.Counter;
-  private cacheOperationsTotal: client.Counter;
-  private cacheOperationDuration: client.Histogram;
-  private videoProcessingDuration: client.Histogram;
-  private videoProcessingTotal: client.Counter;
-  private systemCpuUsage: client.Gauge;
-  private systemMemoryUsage: client.Gauge;
-  private systemDiskUsage: client.Gauge;
-  private businessEventsTotal: client.Counter;
-  private activeConnections: client.Gauge;
-  private errorTotal: client.Counter;
+  private httpRequestsTotal: client.Counter | null = null;
+  private httpRequestDuration: client.Histogram | null = null;
+  private dbQueryDuration: client.Histogram | null = null;
+  private dbQueryTotal: client.Counter | null = null;
+  private cacheOperationsTotal: client.Counter | null = null;
+  private cacheOperationDuration: client.Histogram | null = null;
+  private videoProcessingDuration: client.Histogram | null = null;
+  private videoProcessingTotal: client.Counter | null = null;
+  private systemCpuUsage: client.Gauge | null = null;
+  private systemMemoryUsage: client.Gauge | null = null;
+  private systemDiskUsage: client.Gauge | null = null;
+  private businessEventsTotal: client.Counter | null = null;
+  private activeConnections: client.Gauge | null = null;
+  private errorTotal: client.Counter | null = null;
 
   // Internal metrics
   private startTime: number;
@@ -338,8 +338,8 @@ export class MetricsCollector extends EventEmitter {
           status_code: data.statusCode.toString(),
         };
 
-        this.httpRequestsTotal.inc(labels);
-        this.httpRequestDuration.observe(labels, data.responseTime);
+        this.httpRequestsTotal?.inc(labels);
+        this.httpRequestDuration?.observe(labels, data.responseTime);
       }
 
       // Store in buffer
@@ -379,8 +379,8 @@ export class MetricsCollector extends EventEmitter {
           success: data.success.toString(),
         };
 
-        this.dbQueryTotal.inc(labels);
-        this.dbQueryDuration.observe(labels, data.executionTime);
+        this.dbQueryTotal?.inc(labels);
+        this.dbQueryDuration?.observe(labels, data.executionTime);
       }
 
       // Store in buffer
@@ -418,8 +418,8 @@ export class MetricsCollector extends EventEmitter {
 
       // Record in Prometheus
       if (this.config.prometheus.enabled) {
-        this.cacheOperationsTotal.inc({ operation });
-        this.cacheOperationDuration.observe({ operation }, responseTime);
+        this.cacheOperationsTotal?.inc({ operation });
+        this.cacheOperationDuration?.observe({ operation }, responseTime);
       }
 
       // Store in buffer
@@ -454,8 +454,8 @@ export class MetricsCollector extends EventEmitter {
           success: data.success.toString(),
         };
 
-        this.videoProcessingTotal.inc(labels);
-        this.videoProcessingDuration.observe(labels, data.duration / 1000); // Convert to seconds
+        this.videoProcessingTotal?.inc(labels);
+        this.videoProcessingDuration?.observe(labels, data.duration / 1000); // Convert to seconds
       }
 
       // Store in buffer
@@ -488,9 +488,9 @@ export class MetricsCollector extends EventEmitter {
     try {
       // Record in Prometheus
       if (this.config.prometheus.enabled) {
-        this.systemCpuUsage.set(data.cpuUsage);
-        this.systemMemoryUsage.set(data.memoryUsage);
-        this.systemDiskUsage.set(data.diskUsage);
+        this.systemCpuUsage?.set(data.cpuUsage);
+        this.systemMemoryUsage?.set(data.memoryUsage);
+        this.systemDiskUsage?.set(data.diskUsage);
       }
 
       // Store in buffer
@@ -522,7 +522,7 @@ export class MetricsCollector extends EventEmitter {
     try {
       // Record in Prometheus
       if (this.config.prometheus.enabled) {
-        this.businessEventsTotal.inc({
+        this.businessEventsTotal?.inc({
           event: data.event,
           user_type: data.userId ? 'authenticated' : 'anonymous',
         });
@@ -558,7 +558,7 @@ export class MetricsCollector extends EventEmitter {
 
       // Record in Prometheus
       if (this.config.prometheus.enabled) {
-        this.errorTotal.inc({ type: errorType, severity });
+        this.errorTotal?.inc({ type: errorType, severity });
       }
 
       // Store in buffer
@@ -587,7 +587,7 @@ export class MetricsCollector extends EventEmitter {
 
     try {
       if (this.config.prometheus.enabled) {
-        this.activeConnections.set({ type }, count);
+        this.activeConnections?.set({ type }, count);
       }
 
       this.emit('connection_update', { type, count });
