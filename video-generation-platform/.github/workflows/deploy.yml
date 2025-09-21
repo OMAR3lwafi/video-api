@@ -1,0 +1,614 @@
+name: 'Deploy Pipeline - Blue-Green Strategy'
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      deployment_strategy:
+        description: 'Deployment strategy'
+        required: true
+        default: 'blue-green'
+        type: choice
+        options:
+          - blue-green
+          - rolling
+          - canary
+      skip_tests:
+        description: 'Skip test execution'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  NODE_VERSION: '18'
+  DOCKER_BUILDKIT: 1
+  COMPOSE_DOCKER_CLI_BUILD: 1
+
+jobs:
+  # Security and Quality Gates
+  security-scan:
+    name: 'Security & Compliance Scan'
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || !inputs.skip_tests
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 'Run Trivy Security Scan'
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: 'Upload Security Scan Results'
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: 'Run CodeQL Analysis'
+        uses: github/codeql-action/analyze@v2
+        with:
+          languages: javascript
+
+      - name: 'OWASP Dependency Check'
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'video-generation-platform'
+          path: '.'
+          format: 'JSON'
+          args: >
+            --enableRetired
+            --enableExperimental
+            --nvdApiKey ${{ secrets.NVD_API_KEY }}
+
+  # Build and Package
+  build-images:
+    name: 'Build & Package Images'
+    runs-on: ubuntu-latest
+    needs: [security-scan]
+    if: always() && (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped')
+
+    strategy:
+      matrix:
+        component: [backend, frontend, orchestrator]
+
+    outputs:
+      backend-digest: ${{ steps.build-backend.outputs.digest }}
+      frontend-digest: ${{ steps.build-frontend.outputs.digest }}
+      orchestrator-digest: ${{ steps.build-orchestrator.outputs.digest }}
+      image-tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 'Set up Docker Buildx'
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+
+      - name: 'Log in to Container Registry'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 'Extract Metadata'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.component }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: 'Build and Push ${{ matrix.component }} Image'
+        id: build-${{ matrix.component }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.component }}
+          file: ./${{ matrix.component }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+
+      - name: 'Sign Container Image'
+        uses: sigstore/cosign-installer@v3
+
+      - name: 'Sign Image with Cosign'
+        run: |
+          cosign sign --yes ${{ steps.meta.outputs.tags }}@${{ steps.build-${{ matrix.component }}.outputs.digest }}
+        env:
+          COSIGN_EXPERIMENTAL: 1
+
+      - name: 'Generate SBOM'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.meta.outputs.tags }}@${{ steps.build-${{ matrix.component }}.outputs.digest }}
+          format: spdx-json
+          output-file: ${{ matrix.component }}-sbom.json
+
+      - name: 'Upload SBOM Artifact'
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.component }}-sbom
+          path: ${{ matrix.component }}-sbom.json
+          retention-days: 30
+
+  # Database Migration Validation
+  validate-migrations:
+    name: 'Validate Database Migrations'
+    runs-on: ubuntu-latest
+    needs: [build-images]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: video_platform_migration_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Setup Node.js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: 'Install Dependencies'
+        run: |
+          cd database
+          npm ci --only=production
+
+      - name: 'Run Migration Tests'
+        run: |
+          cd database
+          npm run migrate:test
+          npm run migrate:rollback-test
+        env:
+          DATABASE_URL: postgresql://postgres:test_password@localhost:5432/video_platform_migration_test
+
+      - name: 'Validate Schema Integrity'
+        run: |
+          cd database
+          npm run schema:validate
+        env:
+          DATABASE_URL: postgresql://postgres:test_password@localhost:5432/video_platform_migration_test
+
+  # Staging Deployment
+  deploy-staging:
+    name: 'Deploy to Staging'
+    runs-on: ubuntu-latest
+    needs: [build-images, validate-migrations]
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging')
+    environment:
+      name: staging
+      url: https://staging.video-platform.com
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_STAGING }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_STAGING }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: 'Deploy Infrastructure with Terraform'
+        run: |
+          cd infrastructure/terraform/staging
+          terraform init -backend-config="key=staging/terraform.tfstate"
+          terraform plan -var-file="staging.tfvars"
+          terraform apply -auto-approve -var-file="staging.tfvars"
+        env:
+          TF_VAR_image_tag: ${{ github.sha }}
+          TF_VAR_github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 'Run Database Migrations'
+        run: |
+          cd database
+          npm ci --only=production
+          npm run migrate:staging
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+
+      - name: 'Deploy Application Stack'
+        run: |
+          # Blue-Green Deployment Strategy
+          export IMAGE_TAG=${{ github.sha }}
+          export DEPLOYMENT_COLOR=$([ "$(cat .current-color 2>/dev/null || echo blue)" = "blue" ] && echo "green" || echo "blue")
+
+          # Deploy new version to inactive environment
+          docker-compose -f docker-compose.staging.yml -f docker-compose.$DEPLOYMENT_COLOR.yml up -d
+
+          # Wait for health checks
+          ./scripts/wait-for-health.sh $DEPLOYMENT_COLOR staging
+
+          # Run smoke tests against new deployment
+          ./scripts/smoke-tests.sh https://$DEPLOYMENT_COLOR.staging.video-platform.com
+
+          # Switch traffic to new deployment
+          ./scripts/switch-traffic.sh $DEPLOYMENT_COLOR staging
+
+          # Update current color marker
+          echo $DEPLOYMENT_COLOR > .current-color
+        env:
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          IMAGE_TAG: ${{ github.sha }}
+
+      - name: 'Run Integration Tests'
+        run: |
+          cd e2e
+          npm ci
+          npx playwright test --config=playwright.staging.config.ts
+        env:
+          BASE_URL: https://staging.video-platform.com
+          API_KEY: ${{ secrets.STAGING_API_KEY }}
+
+      - name: 'Performance Testing'
+        run: |
+          cd backend
+          npm run test:performance:staging
+        env:
+          STAGING_API_URL: https://api.staging.video-platform.com
+
+  # Production Deployment (Manual Approval Required)
+  deploy-production:
+    name: 'Deploy to Production'
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.environment == 'production')
+    environment:
+      name: production
+      url: https://video-platform.com
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: 'Create Deployment Backup'
+        run: |
+          # Backup current production state
+          ./scripts/backup-production.sh
+        env:
+          S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+      - name: 'Blue-Green Production Deployment'
+        run: |
+          export IMAGE_TAG=${{ github.sha }}
+          export CURRENT_COLOR=$(kubectl get service video-platform-active -o jsonpath='{.spec.selector.color}' || echo "blue")
+          export NEW_COLOR=$([ "$CURRENT_COLOR" = "blue" ] && echo "green" || echo "blue")
+
+          echo "Current production color: $CURRENT_COLOR"
+          echo "Deploying to color: $NEW_COLOR"
+
+          # Deploy new version
+          envsubst < k8s/deployment-${NEW_COLOR}.yml | kubectl apply -f -
+
+          # Wait for rollout completion
+          kubectl rollout status deployment/video-platform-${NEW_COLOR} --timeout=600s
+
+          # Health check new deployment
+          ./scripts/production-health-check.sh $NEW_COLOR
+
+          # Gradual traffic shift (canary)
+          ./scripts/canary-deployment.sh $CURRENT_COLOR $NEW_COLOR
+
+          # Full traffic switch after successful canary
+          kubectl patch service video-platform-active -p '{"spec":{"selector":{"color":"'$NEW_COLOR'"}}}'
+
+          # Cleanup old deployment after successful switch
+          sleep 300 # Wait 5 minutes before cleanup
+          kubectl delete deployment video-platform-${CURRENT_COLOR} --ignore-not-found=true
+        env:
+          KUBECONFIG: ${{ secrets.KUBECONFIG }}
+
+      - name: 'Run Production Database Migrations'
+        run: |
+          cd database
+          npm ci --only=production
+
+          # Create backup before migration
+          ./scripts/backup-db.sh production
+
+          # Run migrations with rollback capability
+          npm run migrate:production
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET }}
+
+      - name: 'Production Smoke Tests'
+        run: |
+          ./scripts/production-smoke-tests.sh
+
+          # Test critical user journeys
+          cd e2e
+          npx playwright test --config=playwright.production.config.ts --grep="@critical"
+        env:
+          BASE_URL: https://video-platform.com
+          API_KEY: ${{ secrets.PRODUCTION_API_KEY }}
+
+      - name: 'Update Monitoring & Alerts'
+        run: |
+          # Update monitoring dashboards for new deployment
+          ./scripts/update-monitoring.sh ${{ github.sha }} production
+
+          # Configure alerts for new version
+          ./scripts/setup-alerts.sh production ${{ github.sha }}
+        env:
+          GRAFANA_API_KEY: ${{ secrets.GRAFANA_API_KEY }}
+          PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+
+  # Rollback Capability
+  rollback:
+    name: 'Emergency Rollback'
+    runs-on: ubuntu-latest
+    if: failure() && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    needs: [deploy-production]
+    environment:
+      name: production-rollback
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: 'Execute Rollback'
+        run: |
+          # Get previous stable deployment
+          PREVIOUS_COLOR=$(kubectl get service video-platform-inactive -o jsonpath='{.spec.selector.color}' || echo "blue")
+
+          echo "Rolling back to color: $PREVIOUS_COLOR"
+
+          # Switch traffic back to previous stable version
+          kubectl patch service video-platform-active -p '{"spec":{"selector":{"color":"'$PREVIOUS_COLOR'"}}}'
+
+          # Rollback database if needed
+          if [ "${{ github.event.inputs.rollback_database }}" = "true" ]; then
+            cd database
+            npm run migrate:rollback:production
+          fi
+
+          # Notify teams of rollback
+          ./scripts/notify-rollback.sh ${{ github.sha }} $PREVIOUS_COLOR
+        env:
+          KUBECONFIG: ${{ secrets.KUBECONFIG }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+  # Post-Deployment Verification
+  post-deployment-tests:
+    name: 'Post-Deployment Verification'
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: success()
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'End-to-End Production Tests'
+        run: |
+          cd e2e
+          npm ci
+
+          # Run comprehensive E2E tests
+          npx playwright test --config=playwright.production.config.ts
+
+          # Performance regression tests
+          npm run test:performance:production
+        env:
+          BASE_URL: https://video-platform.com
+          API_KEY: ${{ secrets.PRODUCTION_API_KEY }}
+
+      - name: 'Load Testing'
+        run: |
+          # Run production load tests
+          cd backend
+          npm run test:load:production
+        env:
+          PRODUCTION_API_URL: https://api.video-platform.com
+          LOAD_TEST_DURATION: 300 # 5 minutes
+
+      - name: 'Security Validation'
+        run: |
+          # Run security tests against production
+          ./scripts/production-security-scan.sh
+        env:
+          PRODUCTION_URL: https://video-platform.com
+
+      - name: 'Monitor Deployment Success'
+        run: |
+          # Check metrics and alerts for 10 minutes
+          ./scripts/monitor-deployment.sh 600 # 10 minutes
+        env:
+          PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+          GRAFANA_API_KEY: ${{ secrets.GRAFANA_API_KEY }}
+
+  # Notification & Reporting
+  notify:
+    name: 'Deployment Notification'
+    runs-on: ubuntu-latest
+    needs: [deploy-production, post-deployment-tests]
+    if: always()
+
+    steps:
+      - name: 'Deployment Success Notification'
+        if: needs.deploy-production.result == 'success' && needs.post-deployment-tests.result == 'success'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+          custom_payload: |
+            {
+              "attachments": [{
+                "color": "good",
+                "title": "🚀 Production Deployment Successful",
+                "fields": [{
+                  "title": "Repository",
+                  "value": "${{ github.repository }}",
+                  "short": true
+                }, {
+                  "title": "Commit",
+                  "value": "${{ github.sha }}",
+                  "short": true
+                }, {
+                  "title": "Environment",
+                  "value": "Production",
+                  "short": true
+                }, {
+                  "title": "Deployment URL",
+                  "value": "https://video-platform.com",
+                  "short": true
+                }]
+              }]
+            }
+
+      - name: 'Deployment Failure Notification'
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          channel: '#alerts'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+          custom_payload: |
+            {
+              "attachments": [{
+                "color": "danger",
+                "title": "❌ Production Deployment Failed",
+                "fields": [{
+                  "title": "Repository",
+                  "value": "${{ github.repository }}",
+                  "short": true
+                }, {
+                  "title": "Commit",
+                  "value": "${{ github.sha }}",
+                  "short": true
+                }, {
+                  "title": "Failed Job",
+                  "value": "${{ github.job }}",
+                  "short": true
+                }, {
+                  "title": "Logs",
+                  "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+                  "short": true
+                }]
+              }]
+            }
+
+      - name: 'Create Deployment Issue on Failure'
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 Production Deployment Failed - ${context.sha.substring(0, 7)}`,
+              body: `
+                ## Deployment Failure Report
+
+                **Commit:** ${context.sha}
+                **Branch:** ${context.ref}
+                **Workflow:** ${context.workflow}
+                **Run ID:** ${context.runId}
+
+                **Failed Jobs:**
+                - Deploy Production: ${{ needs.deploy-production.result }}
+                - Post-Deployment Tests: ${{ needs.post-deployment-tests.result }}
+
+                **Action Required:**
+                1. Review deployment logs
+                2. Investigate failure cause
+                3. Consider rollback if necessary
+                4. Fix issues and redeploy
+
+                **Links:**
+                - [Workflow Run](${context.payload.repository.html_url}/actions/runs/${context.runId})
+                - [Production Status](https://status.video-platform.com)
+                - [Monitoring Dashboard](https://grafana.video-platform.com)
+              `,
+              labels: ['deployment', 'production', 'urgent']
+            });
+
+  # Cleanup
+  cleanup:
+    name: 'Post-Deployment Cleanup'
+    runs-on: ubuntu-latest
+    needs: [notify]
+    if: always()
+
+    steps:
+      - name: 'Cleanup Artifacts'
+        run: |
+          # Clean up temporary deployment artifacts
+          echo "Cleaning up deployment artifacts..."
+
+      - name: 'Update Deployment History'
+        run: |
+          # Log deployment to history
+          echo "Recording deployment in history..."

@@ -1,0 +1,95 @@
+# Simplified CI workflow for pull requests
+name: Continuous Integration
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [develop]
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  # Quick validation for PRs
+  quick-checks:
+    name: Quick Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          cd backend && npm ci
+          cd ../frontend && npm ci
+
+      - name: Lint and type check
+        run: |
+          cd backend && npm run lint && npm run type-check
+          cd ../frontend && npm run lint && npm run type-check
+
+      - name: Run unit tests
+        run: |
+          cd backend && npm run test:unit
+          cd ../frontend && npm run test:unit
+
+  # Full test suite (only on main branch pushes)
+  full-tests:
+    name: Full Test Suite
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: video_platform_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          cd backend && npm ci
+          cd ../frontend && npm ci
+
+      - name: Run all tests
+        run: |
+          cd backend && npm run test:all
+          cd ../frontend && npm run test:all
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/video_platform_test
+          REDIS_URL: redis://localhost:6379/1

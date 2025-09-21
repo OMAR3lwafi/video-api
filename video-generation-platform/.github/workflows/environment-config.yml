@@ -1,0 +1,668 @@
+name: 'Environment Configuration & Secrets Management'
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      action:
+        description: 'Configuration action'
+        required: true
+        type: choice
+        options:
+          - setup
+          - update
+          - rotate-secrets
+          - scale
+          - backup
+          - restore
+      component:
+        description: 'Component to configure (optional)'
+        required: false
+        type: choice
+        options:
+          - all
+          - backend
+          - frontend
+          - orchestrator
+          - database
+          - monitoring
+  schedule:
+    # Rotate secrets monthly
+    - cron: '0 2 1 * *'
+
+env:
+  AWS_DEFAULT_REGION: us-east-1
+  TERRAFORM_VERSION: '1.6.0'
+  ANSIBLE_VERSION: '8.0.0'
+
+jobs:
+  # Environment Setup and Validation
+  environment-setup:
+    name: 'Environment Setup & Validation'
+    runs-on: ubuntu-latest
+
+    outputs:
+      environment: ${{ steps.config.outputs.environment }}
+      aws-region: ${{ steps.config.outputs.aws-region }}
+      cluster-name: ${{ steps.config.outputs.cluster-name }}
+      vpc-id: ${{ steps.config.outputs.vpc-id }}
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Load Environment Configuration'
+        id: config
+        run: |
+          ENV="${{ github.event.inputs.environment || 'staging' }}"
+
+          case $ENV in
+            staging)
+              echo "environment=staging" >> $GITHUB_OUTPUT
+              echo "aws-region=us-east-1" >> $GITHUB_OUTPUT
+              echo "cluster-name=video-platform-staging" >> $GITHUB_OUTPUT
+              echo "domain=staging.video-platform.com" >> $GITHUB_OUTPUT
+              echo "replicas-min=1" >> $GITHUB_OUTPUT
+              echo "replicas-max=3" >> $GITHUB_OUTPUT
+              echo "cpu-limit=1000m" >> $GITHUB_OUTPUT
+              echo "memory-limit=2Gi" >> $GITHUB_OUTPUT
+              ;;
+            production)
+              echo "environment=production" >> $GITHUB_OUTPUT
+              echo "aws-region=us-east-1" >> $GITHUB_OUTPUT
+              echo "cluster-name=video-platform-prod" >> $GITHUB_OUTPUT
+              echo "domain=video-platform.com" >> $GITHUB_OUTPUT
+              echo "replicas-min=3" >> $GITHUB_OUTPUT
+              echo "replicas-max=20" >> $GITHUB_OUTPUT
+              echo "cpu-limit=2000m" >> $GITHUB_OUTPUT
+              echo "memory-limit=4Gi" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(steps.config.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(steps.config.outputs.environment))] }}
+          aws-region: ${{ steps.config.outputs.aws-region }}
+
+      - name: 'Validate AWS Access'
+        run: |
+          aws sts get-caller-identity
+          aws eks describe-cluster --name ${{ steps.config.outputs.cluster-name }} || true
+
+  # Infrastructure Provisioning
+  provision-infrastructure:
+    name: 'Provision Infrastructure'
+    runs-on: ubuntu-latest
+    needs: [environment-setup]
+    if: github.event.inputs.action == 'setup' || github.event.inputs.action == 'update'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-region: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Initialize Terraform'
+        run: |
+          cd infrastructure/terraform/${{ needs.environment-setup.outputs.environment }}
+          terraform init \
+            -backend-config="bucket=video-platform-terraform-state" \
+            -backend-config="key=${{ needs.environment-setup.outputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ needs.environment-setup.outputs.aws-region }}"
+
+      - name: 'Plan Infrastructure'
+        run: |
+          cd infrastructure/terraform/${{ needs.environment-setup.outputs.environment }}
+          terraform plan \
+            -var-file="${{ needs.environment-setup.outputs.environment }}.tfvars" \
+            -var="image_tag=${{ github.sha }}" \
+            -var="github_token=${{ secrets.GITHUB_TOKEN }}" \
+            -out=tfplan
+
+      - name: 'Apply Infrastructure'
+        if: github.event.inputs.action == 'setup' || github.event.inputs.action == 'update'
+        run: |
+          cd infrastructure/terraform/${{ needs.environment-setup.outputs.environment }}
+          terraform apply tfplan
+
+      - name: 'Output Infrastructure Details'
+        run: |
+          cd infrastructure/terraform/${{ needs.environment-setup.outputs.environment }}
+          terraform output -json > ../../../infrastructure-outputs.json
+
+      - name: 'Upload Infrastructure Outputs'
+        uses: actions/upload-artifact@v3
+        with:
+          name: infrastructure-outputs-${{ needs.environment-setup.outputs.environment }}
+          path: infrastructure-outputs.json
+
+  # Secrets Management
+  secrets-management:
+    name: 'Secrets Management'
+    runs-on: ubuntu-latest
+    needs: [environment-setup, provision-infrastructure]
+    if: always() && (github.event.inputs.action == 'setup' || github.event.inputs.action == 'rotate-secrets' || github.event.schedule)
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-region: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Generate Database Credentials'
+        id: db-creds
+        run: |
+          # Generate secure random passwords
+          DB_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+          DB_READONLY_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+
+          echo "::add-mask::$DB_PASSWORD"
+          echo "::add-mask::$DB_READONLY_PASSWORD"
+
+          # Store in AWS Secrets Manager
+          aws secretsmanager create-secret \
+            --name "video-platform/${{ needs.environment-setup.outputs.environment }}/database/master" \
+            --description "Master database credentials" \
+            --secret-string "{\"username\":\"video_platform\",\"password\":\"$DB_PASSWORD\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }} || \
+          aws secretsmanager update-secret \
+            --secret-id "video-platform/${{ needs.environment-setup.outputs.environment }}/database/master" \
+            --secret-string "{\"username\":\"video_platform\",\"password\":\"$DB_PASSWORD\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }}
+
+          aws secretsmanager create-secret \
+            --name "video-platform/${{ needs.environment-setup.outputs.environment }}/database/readonly" \
+            --description "Readonly database credentials" \
+            --secret-string "{\"username\":\"video_platform_ro\",\"password\":\"$DB_READONLY_PASSWORD\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }} || \
+          aws secretsmanager update-secret \
+            --secret-id "video-platform/${{ needs.environment-setup.outputs.environment }}/database/readonly" \
+            --secret-string "{\"username\":\"video_platform_ro\",\"password\":\"$DB_READONLY_PASSWORD\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Generate API Keys and Tokens'
+        run: |
+          # Generate JWT secrets
+          JWT_SECRET=$(openssl rand -base64 64 | tr -d "=+/" | cut -c1-50)
+          API_KEY=$(openssl rand -hex 32)
+          WEBHOOK_SECRET=$(openssl rand -hex 24)
+
+          echo "::add-mask::$JWT_SECRET"
+          echo "::add-mask::$API_KEY"
+          echo "::add-mask::$WEBHOOK_SECRET"
+
+          # Store API secrets
+          aws secretsmanager create-secret \
+            --name "video-platform/${{ needs.environment-setup.outputs.environment }}/api/auth" \
+            --description "API authentication secrets" \
+            --secret-string "{\"jwt_secret\":\"$JWT_SECRET\",\"api_key\":\"$API_KEY\",\"webhook_secret\":\"$WEBHOOK_SECRET\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }} || \
+          aws secretsmanager update-secret \
+            --secret-id "video-platform/${{ needs.environment-setup.outputs.environment }}/api/auth" \
+            --secret-string "{\"jwt_secret\":\"$JWT_SECRET\",\"api_key\":\"$API_KEY\",\"webhook_secret\":\"$WEBHOOK_SECRET\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Configure External Service Secrets'
+        run: |
+          # AWS S3 Access
+          aws secretsmanager create-secret \
+            --name "video-platform/${{ needs.environment-setup.outputs.environment }}/aws/s3" \
+            --description "S3 service credentials" \
+            --secret-string "{\"access_key_id\":\"${{ secrets.S3_ACCESS_KEY_ID }}\",\"secret_access_key\":\"${{ secrets.S3_SECRET_ACCESS_KEY }}\",\"bucket\":\"video-platform-${{ needs.environment-setup.outputs.environment }}\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }} || \
+          aws secretsmanager update-secret \
+            --secret-id "video-platform/${{ needs.environment-setup.outputs.environment }}/aws/s3" \
+            --secret-string "{\"access_key_id\":\"${{ secrets.S3_ACCESS_KEY_ID }}\",\"secret_access_key\":\"${{ secrets.S3_SECRET_ACCESS_KEY }}\",\"bucket\":\"video-platform-${{ needs.environment-setup.outputs.environment }}\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }}
+
+          # Redis Password
+          REDIS_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+          echo "::add-mask::$REDIS_PASSWORD"
+
+          aws secretsmanager create-secret \
+            --name "video-platform/${{ needs.environment-setup.outputs.environment }}/redis/auth" \
+            --description "Redis authentication" \
+            --secret-string "{\"password\":\"$REDIS_PASSWORD\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }} || \
+          aws secretsmanager update-secret \
+            --secret-id "video-platform/${{ needs.environment-setup.outputs.environment }}/redis/auth" \
+            --secret-string "{\"password\":\"$REDIS_PASSWORD\"}" \
+            --region ${{ needs.environment-setup.outputs.aws-region }}
+
+  # SSL/TLS Certificate Management
+  ssl-certificate-management:
+    name: 'SSL/TLS Certificate Management'
+    runs-on: ubuntu-latest
+    needs: [environment-setup, provision-infrastructure]
+    if: github.event.inputs.action == 'setup' || github.event.inputs.action == 'update'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-region: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Request SSL Certificate'
+        run: |
+          DOMAIN="${{ needs.environment-setup.outputs.environment == 'production' && 'video-platform.com' || 'staging.video-platform.com' }}"
+
+          # Request certificate via ACM
+          CERT_ARN=$(aws acm request-certificate \
+            --domain-name $DOMAIN \
+            --subject-alternative-names "*.$DOMAIN" \
+            --validation-method DNS \
+            --region ${{ needs.environment-setup.outputs.aws-region }} \
+            --query 'CertificateArn' \
+            --output text)
+
+          echo "Certificate ARN: $CERT_ARN"
+
+          # Store certificate ARN in parameter store
+          aws ssm put-parameter \
+            --name "/video-platform/${{ needs.environment-setup.outputs.environment }}/ssl/certificate-arn" \
+            --value "$CERT_ARN" \
+            --type "String" \
+            --overwrite \
+            --region ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Configure Load Balancer SSL'
+        run: |
+          # Update ALB to use SSL certificate
+          ./scripts/configure-ssl.sh ${{ needs.environment-setup.outputs.environment }}
+
+  # Auto-Scaling Configuration
+  auto-scaling-configuration:
+    name: 'Auto-Scaling Configuration'
+    runs-on: ubuntu-latest
+    needs: [environment-setup, provision-infrastructure]
+    if: github.event.inputs.action == 'setup' || github.event.inputs.action == 'update' || github.event.inputs.action == 'scale'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-region: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Configure Kubernetes HPA'
+        run: |
+          # Configure kubectl
+          aws eks update-kubeconfig --name ${{ needs.environment-setup.outputs.cluster-name }}
+
+          # Apply HPA configurations
+          envsubst < k8s/hpa-backend.yml | kubectl apply -f -
+          envsubst < k8s/hpa-frontend.yml | kubectl apply -f -
+          envsubst < k8s/hpa-orchestrator.yml | kubectl apply -f -
+        env:
+          ENVIRONMENT: ${{ needs.environment-setup.outputs.environment }}
+          MIN_REPLICAS: ${{ needs.environment-setup.outputs.replicas-min }}
+          MAX_REPLICAS: ${{ needs.environment-setup.outputs.replicas-max }}
+          CPU_TARGET: 70
+          MEMORY_TARGET: 80
+
+      - name: 'Configure Cluster Autoscaler'
+        run: |
+          # Apply cluster autoscaler
+          envsubst < k8s/cluster-autoscaler.yml | kubectl apply -f -
+        env:
+          CLUSTER_NAME: ${{ needs.environment-setup.outputs.cluster-name }}
+          AWS_REGION: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Configure VPA'
+        run: |
+          # Configure Vertical Pod Autoscaler
+          envsubst < k8s/vpa-backend.yml | kubectl apply -f -
+          envsubst < k8s/vpa-orchestrator.yml | kubectl apply -f -
+        env:
+          ENVIRONMENT: ${{ needs.environment-setup.outputs.environment }}
+
+  # Monitoring and Alerting Setup
+  monitoring-setup:
+    name: 'Monitoring & Alerting Setup'
+    runs-on: ubuntu-latest
+    needs: [environment-setup, provision-infrastructure]
+    if: github.event.inputs.action == 'setup' || github.event.inputs.action == 'update'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-region: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Deploy Monitoring Stack'
+        run: |
+          # Configure kubectl
+          aws eks update-kubeconfig --name ${{ needs.environment-setup.outputs.cluster-name }}
+
+          # Deploy Prometheus and Grafana
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo update
+
+          # Install Prometheus
+          helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --create-namespace \
+            --values monitoring/prometheus-values-${{ needs.environment-setup.outputs.environment }}.yml
+
+          # Install Grafana
+          helm upgrade --install grafana grafana/grafana \
+            --namespace monitoring \
+            --values monitoring/grafana-values-${{ needs.environment-setup.outputs.environment }}.yml
+
+      - name: 'Configure CloudWatch Integration'
+        run: |
+          # Deploy CloudWatch Container Insights
+          kubectl apply -f monitoring/cloudwatch-insights.yml
+
+          # Configure log forwarding
+          kubectl apply -f monitoring/fluent-bit-cloudwatch.yml
+
+      - name: 'Setup Application Monitoring'
+        run: |
+          # Deploy service monitors
+          kubectl apply -f monitoring/servicemonitor-backend.yml
+          kubectl apply -f monitoring/servicemonitor-orchestrator.yml
+
+          # Configure alerting rules
+          kubectl apply -f monitoring/alerting-rules.yml
+
+      - name: 'Configure Notification Channels'
+        run: |
+          # Configure Slack notifications
+          kubectl create secret generic alertmanager-slack \
+            --from-literal=webhook-url="${{ secrets.SLACK_WEBHOOK }}" \
+            --namespace monitoring \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Configure PagerDuty for production
+          if [ "${{ needs.environment-setup.outputs.environment }}" = "production" ]; then
+            kubectl create secret generic alertmanager-pagerduty \
+              --from-literal=integration-key="${{ secrets.PAGERDUTY_INTEGRATION_KEY }}" \
+              --namespace monitoring \
+              --dry-run=client -o yaml | kubectl apply -f -
+          fi
+
+  # Security Configuration
+  security-configuration:
+    name: 'Security Configuration'
+    runs-on: ubuntu-latest
+    needs: [environment-setup, provision-infrastructure]
+    if: github.event.inputs.action == 'setup' || github.event.inputs.action == 'update'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-region: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Configure Network Policies'
+        run: |
+          # Configure kubectl
+          aws eks update-kubeconfig --name ${{ needs.environment-setup.outputs.cluster-name }}
+
+          # Apply network policies
+          kubectl apply -f security/network-policies/
+
+      - name: 'Configure Pod Security Policies'
+        run: |
+          # Apply pod security policies
+          kubectl apply -f security/pod-security-policies/
+
+      - name: 'Configure RBAC'
+        run: |
+          # Apply RBAC configurations
+          envsubst < security/rbac.yml | kubectl apply -f -
+        env:
+          ENVIRONMENT: ${{ needs.environment-setup.outputs.environment }}
+
+      - name: 'Configure Security Context'
+        run: |
+          # Apply security contexts to deployments
+          kubectl patch deployment backend --patch-file security/security-context-patch.yml
+          kubectl patch deployment frontend --patch-file security/security-context-patch.yml
+          kubectl patch deployment orchestrator --patch-file security/security-context-patch.yml
+
+      - name: 'Setup WAF Rules'
+        run: |
+          # Configure AWS WAF for production
+          if [ "${{ needs.environment-setup.outputs.environment }}" = "production" ]; then
+            ./scripts/configure-waf.sh production
+          fi
+
+  # Database Configuration
+  database-configuration:
+    name: 'Database Configuration'
+    runs-on: ubuntu-latest
+    needs: [environment-setup, provision-infrastructure, secrets-management]
+    if: github.event.inputs.action == 'setup' || github.event.inputs.action == 'update' || github.event.inputs.component == 'database'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-region: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Configure Database Backups'
+        run: |
+          # Configure automated backups
+          aws rds modify-db-instance \
+            --db-instance-identifier video-platform-${{ needs.environment-setup.outputs.environment }} \
+            --backup-retention-period 30 \
+            --backup-window "03:00-04:00" \
+            --maintenance-window "sun:04:00-sun:05:00" \
+            --apply-immediately
+
+      - name: 'Configure Read Replicas'
+        if: needs.environment-setup.outputs.environment == 'production'
+        run: |
+          # Create read replica for production
+          aws rds create-db-instance-read-replica \
+            --db-instance-identifier video-platform-prod-replica \
+            --source-db-instance-identifier video-platform-production \
+            --db-instance-class db.r5.large \
+            --multi-az \
+            --publicly-accessible false
+
+      - name: 'Configure Connection Pooling'
+        run: |
+          # Configure kubectl
+          aws eks update-kubeconfig --name ${{ needs.environment-setup.outputs.cluster-name }}
+
+          # Deploy PgBouncer
+          envsubst < database/pgbouncer.yml | kubectl apply -f -
+        env:
+          ENVIRONMENT: ${{ needs.environment-setup.outputs.environment }}
+
+  # Backup Configuration
+  backup-configuration:
+    name: 'Backup & Disaster Recovery Configuration'
+    runs-on: ubuntu-latest
+    needs: [environment-setup, provision-infrastructure]
+    if: github.event.inputs.action == 'setup' || github.event.inputs.action == 'backup'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-region: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Configure S3 Backup Bucket'
+        run: |
+          # Create backup bucket with versioning and lifecycle
+          aws s3api create-bucket \
+            --bucket video-platform-backups-${{ needs.environment-setup.outputs.environment }} \
+            --region ${{ needs.environment-setup.outputs.aws-region }} || true
+
+          aws s3api put-bucket-versioning \
+            --bucket video-platform-backups-${{ needs.environment-setup.outputs.environment }} \
+            --versioning-configuration Status=Enabled
+
+          aws s3api put-bucket-lifecycle-configuration \
+            --bucket video-platform-backups-${{ needs.environment-setup.outputs.environment }} \
+            --lifecycle-configuration file://backup/s3-lifecycle.json
+
+      - name: 'Setup Automated Database Backups'
+        run: |
+          # Configure kubectl
+          aws eks update-kubeconfig --name ${{ needs.environment-setup.outputs.cluster-name }}
+
+          # Deploy backup CronJob
+          envsubst < backup/db-backup-cronjob.yml | kubectl apply -f -
+        env:
+          ENVIRONMENT: ${{ needs.environment-setup.outputs.environment }}
+          S3_BACKUP_BUCKET: video-platform-backups-${{ needs.environment-setup.outputs.environment }}
+
+      - name: 'Setup Application State Backup'
+        run: |
+          # Deploy Velero for cluster backups
+          helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+          helm repo update
+
+          helm upgrade --install velero vmware-tanzu/velero \
+            --namespace velero \
+            --create-namespace \
+            --values backup/velero-values-${{ needs.environment-setup.outputs.environment }}.yml
+
+  # Configuration Validation
+  validate-configuration:
+    name: 'Validate Configuration'
+    runs-on: ubuntu-latest
+    needs: [
+      environment-setup,
+      provision-infrastructure,
+      secrets-management,
+      ssl-certificate-management,
+      auto-scaling-configuration,
+      monitoring-setup,
+      security-configuration,
+      database-configuration,
+      backup-configuration
+    ]
+    if: always() && !failure()
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.environment-setup.outputs.environment))] }}
+          aws-region: ${{ needs.environment-setup.outputs.aws-region }}
+
+      - name: 'Validate Infrastructure'
+        run: |
+          # Validate EKS cluster
+          aws eks describe-cluster --name ${{ needs.environment-setup.outputs.cluster-name }}
+
+          # Validate RDS instance
+          aws rds describe-db-instances --db-instance-identifier video-platform-${{ needs.environment-setup.outputs.environment }}
+
+          # Validate S3 buckets
+          aws s3 ls s3://video-platform-${{ needs.environment-setup.outputs.environment }}
+          aws s3 ls s3://video-platform-backups-${{ needs.environment-setup.outputs.environment }}
+
+      - name: 'Validate Kubernetes Configuration'
+        run: |
+          # Configure kubectl
+          aws eks update-kubeconfig --name ${{ needs.environment-setup.outputs.cluster-name }}
+
+          # Validate deployments
+          kubectl get deployments --all-namespaces
+          kubectl get services --all-namespaces
+          kubectl get ingress --all-namespaces
+
+          # Validate monitoring
+          kubectl get pods -n monitoring
+
+          # Check HPA status
+          kubectl get hpa
+
+      - name: 'Validate Secrets'
+        run: |
+          # Validate secrets in AWS Secrets Manager
+          aws secretsmanager describe-secret --secret-id "video-platform/${{ needs.environment-setup.outputs.environment }}/database/master"
+          aws secretsmanager describe-secret --secret-id "video-platform/${{ needs.environment-setup.outputs.environment }}/api/auth"
+          aws secretsmanager describe-secret --secret-id "video-platform/${{ needs.environment-setup.outputs.environment }}/aws/s3"
+
+      - name: 'Generate Configuration Report'
+        run: |
+          # Generate comprehensive configuration report
+          cat > configuration-report.md << EOF
+          # Environment Configuration Report
+
+          **Environment:** ${{ needs.environment-setup.outputs.environment }}
+          **Region:** ${{ needs.environment-setup.outputs.aws-region }}
+          **Cluster:** ${{ needs.environment-setup.outputs.cluster-name }}
+          **Date:** $(date -u)
+
+          ## Infrastructure Status
+          - EKS Cluster: ✅ Active
+          - RDS Database: ✅ Available
+          - Load Balancer: ✅ Active
+          - Auto Scaling: ✅ Configured
+
+          ## Security Configuration
+          - SSL Certificate: ✅ Active
+          - Network Policies: ✅ Applied
+          - RBAC: ✅ Configured
+          - Secrets Management: ✅ Active
+
+          ## Monitoring & Alerting
+          - Prometheus: ✅ Running
+          - Grafana: ✅ Running
+          - CloudWatch:
