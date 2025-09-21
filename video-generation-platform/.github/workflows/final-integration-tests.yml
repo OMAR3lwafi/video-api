@@ -1,0 +1,793 @@
+name: 'Final Integration Tests & QA Validation'
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Test suite to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - integration
+          - performance
+          - security
+          - disaster-recovery
+          - user-acceptance
+          - scalability
+          - smoke
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      load_test_duration:
+        description: 'Load test duration (minutes)'
+        required: false
+        default: '10'
+        type: string
+      concurrent_users:
+        description: 'Concurrent users for load testing'
+        required: false
+        default: '100'
+        type: string
+  schedule:
+    # Run comprehensive tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      test_suite:
+        required: false
+        type: string
+        default: 'all'
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+  JAVA_VERSION: '17'
+  TEST_TIMEOUT: 3600000 # 1 hour in milliseconds
+  RETRY_ATTEMPTS: 3
+
+jobs:
+  # Test Environment Setup and Validation
+  setup-test-environment:
+    name: 'Setup Test Environment'
+    runs-on: ubuntu-latest
+
+    outputs:
+      base-url: ${{ steps.config.outputs.base-url }}
+      api-url: ${{ steps.config.outputs.api-url }}
+      test-db-url: ${{ steps.config.outputs.test-db-url }}
+      environment: ${{ steps.config.outputs.environment }}
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Load Test Configuration'
+        id: config
+        run: |
+          ENV="${{ github.event.inputs.environment || 'staging' }}"
+
+          case $ENV in
+            staging)
+              echo "base-url=https://staging.video-platform.com" >> $GITHUB_OUTPUT
+              echo "api-url=https://api.staging.video-platform.com" >> $GITHUB_OUTPUT
+              echo "ws-url=wss://ws.staging.video-platform.com" >> $GITHUB_OUTPUT
+              echo "environment=staging" >> $GITHUB_OUTPUT
+              ;;
+            production)
+              echo "base-url=https://video-platform.com" >> $GITHUB_OUTPUT
+              echo "api-url=https://api.video-platform.com" >> $GITHUB_OUTPUT
+              echo "ws-url=wss://ws.video-platform.com" >> $GITHUB_OUTPUT
+              echo "environment=production" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: 'Validate Environment Accessibility'
+        run: |
+          # Test basic connectivity
+          curl -f ${{ steps.config.outputs.base-url }}/health || exit 1
+          curl -f ${{ steps.config.outputs.api-url }}/health || exit 1
+
+          # Validate SSL certificates
+          echo | openssl s_client -servername $(echo ${{ steps.config.outputs.base-url }} | sed 's/https:\/\///') -connect $(echo ${{ steps.config.outputs.base-url }} | sed 's/https:\/\///').:443 2>/dev/null | openssl x509 -noout -dates
+
+      - name: 'Setup Test Database'
+        run: |
+          # Create isolated test database
+          docker run -d --name test-postgres \
+            -e POSTGRES_PASSWORD=test_password \
+            -e POSTGRES_DB=video_platform_integration_test \
+            -p 5433:5432 \
+            postgres:15-alpine
+
+          # Wait for database to be ready
+          timeout 30 sh -c 'until docker exec test-postgres pg_isready; do sleep 1; done'
+
+          echo "test-db-url=postgresql://postgres:test_password@localhost:5433/video_platform_integration_test" >> $GITHUB_OUTPUT
+
+  # Comprehensive Integration Testing
+  integration-tests:
+    name: 'Integration Tests'
+    runs-on: ubuntu-latest
+    needs: [setup-test-environment]
+    if: github.event.inputs.test_suite == 'all' || github.event.inputs.test_suite == 'integration' || github.event.inputs.test_suite == ''
+
+    strategy:
+      fail-fast: false
+      matrix:
+        test-group: [
+          'api-endpoints',
+          'video-processing',
+          'real-time-features',
+          'file-operations',
+          'user-workflows',
+          'error-handling',
+          'cross-service'
+        ]
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Setup Node.js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 'Install Dependencies'
+        run: |
+          npm ci
+          cd e2e && npm ci
+          cd ../backend && npm ci
+
+      - name: 'Setup Test Data'
+        run: |
+          # Generate test video files
+          cd e2e/fixtures
+          ./generate-test-videos.sh
+
+          # Setup test user accounts
+          ./setup-test-users.sh ${{ needs.setup-test-environment.outputs.environment }}
+        env:
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+
+      - name: 'Run Integration Tests - ${{ matrix.test-group }}'
+        run: |
+          cd e2e
+
+          case "${{ matrix.test-group }}" in
+            api-endpoints)
+              npx playwright test tests/api/ --reporter=json --output-dir=results/api
+              ;;
+            video-processing)
+              npx playwright test tests/video-processing/ --reporter=json --output-dir=results/video
+              ;;
+            real-time-features)
+              npx playwright test tests/realtime/ --reporter=json --output-dir=results/realtime
+              ;;
+            file-operations)
+              npx playwright test tests/file-operations/ --reporter=json --output-dir=results/files
+              ;;
+            user-workflows)
+              npx playwright test tests/workflows/ --reporter=json --output-dir=results/workflows
+              ;;
+            error-handling)
+              npx playwright test tests/error-handling/ --reporter=json --output-dir=results/errors
+              ;;
+            cross-service)
+              npx playwright test tests/integration/ --reporter=json --output-dir=results/integration
+              ;;
+          esac
+        env:
+          BASE_URL: ${{ needs.setup-test-environment.outputs.base-url }}
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+          WS_URL: ${{ needs.setup-test-environment.outputs.ws-url }}
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+          ADMIN_API_KEY: ${{ secrets[format('ADMIN_API_KEY_{0}', upper(needs.setup-test-environment.outputs.environment))] }}
+
+      - name: 'Upload Test Results'
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: integration-test-results-${{ matrix.test-group }}
+          path: e2e/results/
+          retention-days: 30
+
+      - name: 'Generate Test Report'
+        if: always()
+        run: |
+          cd e2e
+          npm run generate-report -- results/${{ matrix.test-group }}
+
+  # Performance and Load Testing
+  performance-tests:
+    name: 'Performance & Load Tests'
+    runs-on: ubuntu-latest
+    needs: [setup-test-environment]
+    if: github.event.inputs.test_suite == 'all' || github.event.inputs.test_suite == 'performance'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Setup Node.js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 'Install K6 for Load Testing'
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: 'Setup Artillery for Advanced Load Testing'
+        run: |
+          npm install -g artillery@latest
+          artillery --version
+
+      - name: 'API Performance Tests'
+        run: |
+          cd performance
+
+          # Basic API performance
+          k6 run --duration=${{ github.event.inputs.load_test_duration || '10' }}m \
+                 --vus=${{ github.event.inputs.concurrent_users || '100' }} \
+                 tests/api-performance.js
+
+          # Video upload performance
+          k6 run --duration=5m --vus=20 tests/video-upload-performance.js
+
+          # Real-time features performance
+          k6 run --duration=3m --vus=50 tests/websocket-performance.js
+        env:
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+          BASE_URL: ${{ needs.setup-test-environment.outputs.base-url }}
+          API_KEY: ${{ secrets[format('TEST_API_KEY_{0}', upper(needs.setup-test-environment.outputs.environment))] }}
+
+      - name: 'Database Performance Tests'
+        run: |
+          cd performance
+
+          # Database query performance
+          node tests/database-performance.js
+
+          # Connection pooling stress test
+          node tests/connection-pool-stress.js
+        env:
+          DATABASE_URL: ${{ secrets[format('DATABASE_URL_{0}', upper(needs.setup-test-environment.outputs.environment))] }}
+
+      - name: 'Frontend Performance Tests'
+        run: |
+          cd e2e
+
+          # Lighthouse performance audit
+          npm install -g @lhci/cli@0.12.x
+          lhci autorun --config=lighthouse-config.json
+
+          # Core Web Vitals testing
+          npx playwright test tests/performance/core-web-vitals.spec.ts
+        env:
+          BASE_URL: ${{ needs.setup-test-environment.outputs.base-url }}
+
+      - name: 'Video Processing Performance Tests'
+        run: |
+          cd performance
+
+          # Test various video processing scenarios
+          artillery run tests/video-processing-load.yml --environment ${{ needs.setup-test-environment.outputs.environment }}
+        env:
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+
+      - name: 'Upload Performance Results'
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: performance-test-results
+          path: |
+            performance/results/
+            e2e/lighthouse-results/
+            e2e/test-results/performance/
+          retention-days: 30
+
+  # Security and Penetration Testing
+  security-tests:
+    name: 'Security & Penetration Tests'
+    runs-on: ubuntu-latest
+    needs: [setup-test-environment]
+    if: github.event.inputs.test_suite == 'all' || github.event.inputs.test_suite == 'security'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Setup Python for Security Tools'
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 'Install Security Testing Tools'
+        run: |
+          # Install OWASP ZAP
+          wget -q https://github.com/zaproxy/zaproxy/releases/download/v2.14.0/ZAP_2_14_0_Linux.tar.gz
+          tar -xf ZAP_2_14_0_Linux.tar.gz
+          sudo mv ZAP_2.14.0 /opt/zaproxy
+
+          # Install Nuclei
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+
+          # Install security Python packages
+          pip install bandit safety sqlmap
+
+      - name: 'OWASP ZAP Baseline Scan'
+        run: |
+          # Run ZAP baseline scan
+          docker run -v $(pwd)/security:/zap/wrk/:rw \
+            -t owasp/zap2docker-stable zap-baseline.py \
+            -t ${{ needs.setup-test-environment.outputs.base-url }} \
+            -J zap-baseline-report.json \
+            -r zap-baseline-report.html
+
+      - name: 'OWASP ZAP Full Scan'
+        if: needs.setup-test-environment.outputs.environment == 'staging'
+        run: |
+          # Run comprehensive ZAP scan (only on staging)
+          docker run -v $(pwd)/security:/zap/wrk/:rw \
+            -t owasp/zap2docker-stable zap-full-scan.py \
+            -t ${{ needs.setup-test-environment.outputs.base-url }} \
+            -J zap-full-report.json \
+            -r zap-full-report.html
+
+      - name: 'Nuclei Vulnerability Scan'
+        run: |
+          # Run Nuclei scan for common vulnerabilities
+          ~/go/bin/nuclei -u ${{ needs.setup-test-environment.outputs.base-url }} \
+            -t ~/nuclei-templates/ \
+            -json -o security/nuclei-report.json
+
+      - name: 'API Security Tests'
+        run: |
+          cd security
+
+          # Test API authentication and authorization
+          python api-security-tests.py \
+            --api-url ${{ needs.setup-test-environment.outputs.api-url }} \
+            --output api-security-report.json
+
+          # Test for injection vulnerabilities
+          python injection-tests.py \
+            --api-url ${{ needs.setup-test-environment.outputs.api-url }}
+        env:
+          API_KEY: ${{ secrets[format('TEST_API_KEY_{0}', upper(needs.setup-test-environment.outputs.environment))] }}
+
+      - name: 'File Upload Security Tests'
+        run: |
+          cd security
+
+          # Test file upload security
+          python file-upload-security.py \
+            --api-url ${{ needs.setup-test-environment.outputs.api-url }}
+
+      - name: 'Database Security Assessment'
+        if: needs.setup-test-environment.outputs.environment == 'staging'
+        run: |
+          cd security
+
+          # Run database security tests (staging only)
+          python db-security-tests.py \
+            --db-url ${{ needs.setup-test-environment.outputs.test-db-url }}
+
+      - name: 'SSL/TLS Configuration Test'
+        run: |
+          # Test SSL configuration
+          docker run --rm -it nablac0d3/sslyze \
+            --regular ${{ needs.setup-test-environment.outputs.base-url }} \
+            --json_out=security/ssl-report.json
+
+      - name: 'Upload Security Test Results'
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-test-results
+          path: security/
+          retention-days: 30
+
+  # Disaster Recovery Testing
+  disaster-recovery-tests:
+    name: 'Disaster Recovery Tests'
+    runs-on: ubuntu-latest
+    needs: [setup-test-environment]
+    if: github.event.inputs.test_suite == 'all' || github.event.inputs.test_suite == 'disaster-recovery'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Setup AWS CLI'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', upper(needs.setup-test-environment.outputs.environment))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', upper(needs.setup-test-environment.outputs.environment))] }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: 'Test Database Backup and Restore'
+        run: |
+          cd disaster-recovery
+
+          # Test database backup
+          ./test-db-backup.sh ${{ needs.setup-test-environment.outputs.environment }}
+
+          # Test database restore (to test instance)
+          ./test-db-restore.sh ${{ needs.setup-test-environment.outputs.environment }}
+
+      - name: 'Test Application State Backup'
+        run: |
+          cd disaster-recovery
+
+          # Test Velero backup and restore
+          ./test-velero-backup.sh ${{ needs.setup-test-environment.outputs.environment }}
+
+      - name: 'Test Service Failover'
+        run: |
+          cd disaster-recovery
+
+          # Test load balancer failover
+          ./test-service-failover.sh ${{ needs.setup-test-environment.outputs.environment }}
+
+          # Test database failover (if read replicas exist)
+          if [ "${{ needs.setup-test-environment.outputs.environment }}" = "production" ]; then
+            ./test-db-failover.sh production
+          fi
+
+      - name: 'Test Auto-scaling During Failure'
+        run: |
+          cd disaster-recovery
+
+          # Simulate high load and node failure
+          ./test-autoscaling-failure.sh ${{ needs.setup-test-environment.outputs.environment }}
+
+      - name: 'Upload DR Test Results'
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: disaster-recovery-test-results
+          path: disaster-recovery/results/
+          retention-days: 30
+
+  # User Acceptance Testing Simulation
+  user-acceptance-tests:
+    name: 'User Acceptance Tests'
+    runs-on: ubuntu-latest
+    needs: [setup-test-environment]
+    if: github.event.inputs.test_suite == 'all' || github.event.inputs.test_suite == 'user-acceptance'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        user-journey: [
+          'new-user-onboarding',
+          'video-creation-workflow',
+          'complex-video-editing',
+          'collaboration-features',
+          'mobile-experience',
+          'accessibility-compliance'
+        ]
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Setup Node.js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 'Install Playwright'
+        run: |
+          cd e2e
+          npm ci
+          npx playwright install --with-deps
+
+      - name: 'Run User Journey Tests - ${{ matrix.user-journey }}'
+        run: |
+          cd e2e
+
+          case "${{ matrix.user-journey }}" in
+            new-user-onboarding)
+              npx playwright test tests/user-journeys/onboarding.spec.ts --project=chromium
+              ;;
+            video-creation-workflow)
+              npx playwright test tests/user-journeys/video-creation.spec.ts --project=chromium
+              ;;
+            complex-video-editing)
+              npx playwright test tests/user-journeys/complex-editing.spec.ts --project=chromium
+              ;;
+            collaboration-features)
+              npx playwright test tests/user-journeys/collaboration.spec.ts --project=chromium
+              ;;
+            mobile-experience)
+              npx playwright test tests/user-journeys/mobile.spec.ts --project="Mobile Chrome"
+              ;;
+            accessibility-compliance)
+              npx playwright test tests/accessibility/ --project=chromium
+              ;;
+          esac
+        env:
+          BASE_URL: ${{ needs.setup-test-environment.outputs.base-url }}
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+          TEST_TIMEOUT: ${{ env.TEST_TIMEOUT }}
+
+      - name: 'Generate Accessibility Report'
+        if: matrix.user-journey == 'accessibility-compliance'
+        run: |
+          cd e2e
+
+          # Generate axe accessibility report
+          npm run accessibility-audit
+
+          # Generate WAVE report
+          npm run wave-audit
+
+      - name: 'Upload UAT Results'
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: uat-results-${{ matrix.user-journey }}
+          path: |
+            e2e/test-results/
+            e2e/playwright-report/
+            e2e/accessibility-report/
+          retention-days: 30
+
+  # Scalability Testing
+  scalability-tests:
+    name: 'Scalability Tests'
+    runs-on: ubuntu-latest
+    needs: [setup-test-environment]
+    if: github.event.inputs.test_suite == 'all' || github.event.inputs.test_suite == 'scalability'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Setup Load Testing Tools'
+        run: |
+          # Install K6
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+          # Install Artillery
+          npm install -g artillery@latest
+
+      - name: 'Gradual Load Increase Test'
+        run: |
+          cd scalability
+
+          # Test system behavior under gradually increasing load
+          k6 run tests/gradual-load-increase.js
+        env:
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+          BASE_URL: ${{ needs.setup-test-environment.outputs.base-url }}
+
+      - name: 'Spike Load Test'
+        run: |
+          cd scalability
+
+          # Test system behavior under sudden load spikes
+          k6 run tests/spike-load.js
+        env:
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+
+      - name: 'Sustained Load Test'
+        run: |
+          cd scalability
+
+          # Test system stability under sustained high load
+          artillery run tests/sustained-load.yml --environment ${{ needs.setup-test-environment.outputs.environment }}
+        env:
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+
+      - name: 'Concurrent Video Processing Test'
+        run: |
+          cd scalability
+
+          # Test concurrent video processing capacity
+          k6 run tests/concurrent-video-processing.js
+        env:
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+          API_KEY: ${{ secrets[format('TEST_API_KEY_{0}', upper(needs.setup-test-environment.outputs.environment))] }}
+
+      - name: 'Database Connection Pool Test'
+        run: |
+          cd scalability
+
+          # Test database under high connection load
+          node tests/db-connection-stress.js
+        env:
+          DATABASE_URL: ${{ secrets[format('DATABASE_URL_{0}', upper(needs.setup-test-environment.outputs.environment))] }}
+
+      - name: 'Upload Scalability Results'
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: scalability-test-results
+          path: scalability/results/
+          retention-days: 30
+
+  # Smoke Tests (Quick Validation)
+  smoke-tests:
+    name: 'Smoke Tests'
+    runs-on: ubuntu-latest
+    needs: [setup-test-environment]
+    if: github.event.inputs.test_suite == 'smoke' || github.event.inputs.test_suite == ''
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Setup Node.js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 'Install Dependencies'
+        run: |
+          cd e2e
+          npm ci
+
+      - name: 'Run Critical Path Smoke Tests'
+        run: |
+          cd e2e
+
+          # Run only critical path tests
+          npx playwright test tests/smoke/ --project=chromium
+        env:
+          BASE_URL: ${{ needs.setup-test-environment.outputs.base-url }}
+          API_URL: ${{ needs.setup-test-environment.outputs.api-url }}
+          API_KEY: ${{ secrets[format('TEST_API_KEY_{0}', upper(needs.setup-test-environment.outputs.environment))] }}
+
+      - name: 'API Health Checks'
+        run: |
+          # Comprehensive API health validation
+          curl -f ${{ needs.setup-test-environment.outputs.api-url }}/health/detailed
+          curl -f ${{ needs.setup-test-environment.outputs.api-url }}/metrics
+
+          # Test critical endpoints
+          cd e2e
+          npm run api-smoke-tests
+
+      - name: 'Upload Smoke Test Results'
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: smoke-test-results
+          path: e2e/test-results/smoke/
+          retention-days: 7
+
+  # Final Validation and Reporting
+  final-validation:
+    name: 'Final Validation & Reporting'
+    runs-on: ubuntu-latest
+    needs: [
+      integration-tests,
+      performance-tests,
+      security-tests,
+      disaster-recovery-tests,
+      user-acceptance-tests,
+      scalability-tests,
+      smoke-tests
+    ]
+    if: always()
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Download All Test Results'
+        uses: actions/download-artifact@v3
+        with:
+          path: test-results/
+
+      - name: 'Generate Comprehensive Test Report'
+        run: |
+          cd test-results
+
+          # Create comprehensive HTML report
+          cat > final-test-report.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Video Platform - Final Integration Test Report</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 20px; }
+                  .header { background: #f4f4f4; padding: 20px; border-radius: 5px; }
+                  .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+                  .success { background: #d4edda; border-color: #c3e6cb; }
+                  .warning { background: #fff3cd; border-color: #ffeaa7; }
+                  .error { background: #f8d7da; border-color: #f5c6cb; }
+                  table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+                  th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                  th { background: #f4f4f4; }
+              </style>
+          </head>
+          <body>
+              <div class="header">
+                  <h1>Video Platform - Final Integration Test Report</h1>
+                  <p><strong>Environment:</strong> ${{ needs.setup-test-environment.outputs.environment }}</p>
+                  <p><strong>Date:</strong> $(date)</p>
+                  <p><strong>Commit:</strong> ${{ github.sha }}</p>
+              </div>
+          EOF
+
+          # Add test results summary
+          echo '<div class="section">' >> final-test-report.html
+          echo '<h2>Test Summary</h2>' >> final-test-report.html
+          echo '<table>' >> final-test-report.html
+          echo '<tr><th>Test Suite</th><th>Status</th><th>Duration</th><th>Details</th></tr>' >> final-test-report.html
+
+          # Process each test suite result
+          for result in */; do
+              if [ -d "$result" ]; then
+                  echo "<tr><td>$(basename "$result")</td><td>✅ Completed</td><td>-</td><td>Available</td></tr>" >> final-test-report.html
+              fi
+          done
+
+          echo '</table>' >> final-test-report.html
+          echo '</div>' >> final-test-report.html
+          echo '</body></html>' >> final-test-report.html
+
+      - name: 'Generate JSON Summary'
+        run: |
+          cd test-results
+
+          # Create machine-readable summary
+          cat > test-summary.json << EOF
+          {
+            "environment": "${{ needs.setup-test-environment.outputs.environment }}",
+            "timestamp": "$(date -u -Iseconds)",
+            "commit": "${{ github.sha }}",
+            "workflow_run": "${{ github.run_id }}",
+            "test_suites": {
+              "integration": "${{ needs.integration-tests.result }}",
+              "performance": "${{ needs.performance-tests.result }}",
+              "security": "${{ needs.security-tests.result }}",
+              "disaster_recovery": "${{ needs.disaster-recovery-tests.result }}",
+              "user_acceptance": "${{ needs.user-acceptance-tests.result }}",
+              "scalability": "${{ needs.scalability-tests.result }}",
+              "smoke": "${{ needs.smoke-tests.result }}"
+            },
+            "overall_status": "$([ '${{ needs.integration-tests.result }}' = 'success' ] && [ '${{ needs.performance-tests.result }}' = 'success' ] && [ '${{ needs.security-tests.result }}' = 'success' ] && echo 'PASS' || echo 'FAIL')"
+          }
+          EOF
+
+      - name: 'Upload Final Test Report'
+        uses: actions/upload-artifact@v3
+        with:
+          name: final-test-report
+          path: |
+            test-results/final-test-report.html
+            test-results/test-summary.json
+          retention-days: 90
+
+      - name: 'Create GitHub Issue for Failures'
+        if: failure()
+        uses: actions/github
